@@ -1,5 +1,6 @@
 // Sensor Hardware Test — PandaV2
-// Interactive test for PTs, load cells, and current sense.
+// Interactive test for PTs (mux A) and DC channel current sense (mux C).
+// Mux B (load cells + thermocouples) is unassembled and not scanned.
 // Run via USB serial. Select a test from the menu.
 
 #include <Arduino.h>
@@ -97,65 +98,45 @@ static void testPTSweep() {
     Serial.println();
 }
 
-// ── 2. Load cell sweep ─────────────────────────────────────────────
-
-static void testLCSweep() {
-    Serial.println("=== Load Cell Sweep (Mux C ch 0-7 → ADC2 CH0) ===");
-    if (!adc2_ok) { Serial.println("ADC2 not initialized."); return; }
-
-    Serial.println("  CH  |     Raw     |   Voltage (V)  |  Converted");
-    Serial.println("  ----+-------------+----------------+-----------");
-
-    for (uint8_t i = 0; i < NUM_LC_CH; i++) {
-        uint8_t muxCh = MUX_C_LC_START + i;
-        ReadResult r = readMuxCh(adc2, MUX_C_PINS, MCP3561RT::Mux::CH0, muxCh);
-        if (r.ok) {
-            float conv = convertLC(r.voltage, i);
-            Serial.printf("  %02d  | %10d  |  %+.6f     |  %.4f\n",
-                          i, r.raw, r.voltage, conv);
-        } else {
-            Serial.printf("  %02d  |    FAIL     |     ---        |   ---\n", i);
-        }
-    }
-    Serial.println();
-}
-
-// ── 3. Current sense sweep ─────────────────────────────────────────
+// ── 2. DC channel current sweep ────────────────────────────────────
 
 static void testCurrentSweep() {
-    Serial.println("=== Current Sense Sweep (Mux B → ADC1 CH1) ===");
-    if (!adc1_ok) { Serial.println("ADC1 not initialized."); return; }
+    Serial.println("=== DC Current Sweep (Mux C → ADC2 CH0) ===");
+    Serial.println("ACTUATE n is sensed on mux C ch 16-n (INA181A1, x20).");
+    if (!adc2_ok) { Serial.println("ADC2 not initialized."); return; }
 
-    Serial.println("  CH  |     Raw     |   Voltage (V)  |  Current (A)");
-    Serial.println("  ----+-------------+----------------+-------------");
+    Serial.println("  ACTUATE  |  CH  |     Raw     |   Voltage (V)  |  Current (A)");
+    Serial.println("  ---------+------+-------------+----------------+-------------");
 
-    for (uint8_t ch = 0; ch < NUM_MUX_B_CH; ch++) {
-        ReadResult r = readMuxCh(adc1, MUX_B_PINS, MCP3561RT::Mux::CH1, ch);
+    for (uint8_t act = 1; act <= NUM_CURRENT_CH; act++) {
+        const uint8_t ch = currentMuxCh(act);
+        ReadResult r = readMuxCh(adc2, MUX_C_PINS, MCP3561RT::Mux::CH0, ch);
         if (r.ok) {
             float amps = convertCurrent(r.voltage);
-            Serial.printf("  %02d  | %10d  |  %+.6f     |  %.4f\n",
-                          ch, r.raw, r.voltage, amps);
+            Serial.printf("     %2u    |  %02u  | %10d  |  %+.6f     |  %.4f%s\n",
+                          act, ch, r.raw, r.voltage, amps,
+                          amps >= CURRENT_FULL_SCALE_A * 0.99f ? "  <-- CLIPPED" : "");
         } else {
-            Serial.printf("  %02d  |    FAIL     |     ---        |   ---\n", ch);
+            Serial.printf("     %2u    |  %02u  |    FAIL     |     ---        |   ---\n",
+                          act, ch);
         }
     }
     Serial.println();
 }
 
-// ── 4. Full sweep (all sensors) ────────────────────────────────────
+// ── 3. Full sweep (all sensors) ────────────────────────────────────
 
 static void testFullSweep() {
     testPTSweep();
     testCurrentSweep();
-    testLCSweep();
 }
 
-// ── 5. Continuous stream ───────────────────────────────────────────
+// ── 4. Continuous stream ───────────────────────────────────────────
 
 static void testStream() {
     Serial.println("=== Continuous Stream ===");
     Serial.println("Streaming all sensors. Send any character to stop.");
-    Serial.println("Format: PT0..15, LC0..7, CUR0..15");
+    Serial.println("Format: PT0..15 (mA), CUR0..15 (A, = ACTUATE 1..16)");
     Serial.println();
 
     while (true) {
@@ -178,26 +159,13 @@ static void testStream() {
             Serial.println();
         }
 
-        // Load cells
+        // DC channel current sense
         if (adc2_ok) {
-            Serial.print("LC:");
-            for (uint8_t i = 0; i < NUM_LC_CH; i++) {
-                ReadResult r = readMuxCh(adc2, MUX_C_PINS, MCP3561RT::Mux::CH0, MUX_C_LC_START + i);
-                if (i > 0) Serial.print(',');
-                if (r.ok)
-                    Serial.printf("%.5f", convertLC(r.voltage, i));
-                else
-                    Serial.print("NaN");
-            }
-            Serial.println();
-        }
-
-        // Current sense
-        if (adc1_ok) {
             Serial.print("CUR:");
-            for (uint8_t ch = 0; ch < NUM_MUX_B_CH; ch++) {
-                ReadResult r = readMuxCh(adc1, MUX_B_PINS, MCP3561RT::Mux::CH1, ch);
-                if (ch > 0) Serial.print(',');
+            for (uint8_t act = 1; act <= NUM_CURRENT_CH; act++) {
+                ReadResult r = readMuxCh(adc2, MUX_C_PINS, MCP3561RT::Mux::CH0,
+                                         currentMuxCh(act));
+                if (act > 1) Serial.print(',');
                 if (r.ok)
                     Serial.printf("%.4f", convertCurrent(r.voltage));
                 else
@@ -214,7 +182,7 @@ static void testStream() {
     Serial.println();
 }
 
-// ── 6. Board temperature ───────────────────────────────────────────
+// ── 5. Board temperature ───────────────────────────────────────────
 
 static void testBoardTemp() {
     Serial.println("=== Board Temperature (ADC internal sensor) ===");
@@ -230,7 +198,7 @@ static void testBoardTemp() {
     Serial.println();
 }
 
-// ── 7. ADC register dump ───────────────────────────────────────────
+// ── 6. ADC register dump ───────────────────────────────────────────
 
 static void testRegDump() {
     const char* regNames[] = {"ADCDATA","CONFIG0","CONFIG1","CONFIG2","CONFIG3","IRQ","MUX"};
@@ -253,13 +221,12 @@ static void printMenu() {
     Serial.println("──────────────────────────────────");
     Serial.println("  PandaV2 Sensor Test");
     Serial.println("──────────────────────────────────");
-    Serial.println("  1  PT sweep (Mux A, 16ch)");
-    Serial.println("  2  Load cell sweep (Mux C, 8ch)");
-    Serial.println("  3  Current sense sweep (Mux B, 16ch)");
-    Serial.println("  4  Full sweep (all sensors)");
-    Serial.println("  5  Continuous stream");
-    Serial.println("  6  Board temperature (ADC internal sensor)");
-    Serial.println("  7  ADC register dump");
+    Serial.println("  1  PT sweep (Mux A -> ADC1, 16ch)");
+    Serial.println("  2  DC current sweep (Mux C -> ADC2, 16ch)");
+    Serial.println("  3  Full sweep (all sensors)");
+    Serial.println("  4  Continuous stream");
+    Serial.println("  5  Board temperature (ADC internal sensor)");
+    Serial.println("  6  ADC register dump");
     Serial.println("──────────────────────────────────");
     Serial.print("> ");
 }
@@ -299,12 +266,11 @@ void loop() {
 
     switch (cmd) {
         case 1: testPTSweep();      break;
-        case 2: testLCSweep();      break;
-        case 3: testCurrentSweep(); break;
-        case 4: testFullSweep();    break;
-        case 5: testStream();       break;
-        case 6: testBoardTemp();    break;
-        case 7: testRegDump();      break;
+        case 2: testCurrentSweep(); break;
+        case 3: testFullSweep();    break;
+        case 4: testStream();       break;
+        case 5: testBoardTemp();    break;
+        case 6: testRegDump();      break;
         default: break;
     }
 

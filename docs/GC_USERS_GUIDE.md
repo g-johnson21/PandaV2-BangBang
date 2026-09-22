@@ -14,7 +14,9 @@ Both RS-485 buses are equivalent GC links. Commands are accepted on either; dire
 
 Every packet is a single line terminated by `\n` (or `\r`). **Only terminated lines are executed.** Bytes followed by 100 ms of silence with no terminator (`PACKET_IDLE_MS`), and lines longer than 511 characters, are discarded rather than run, so line noise or a cut-off command can never act as a command.
 
-Unlike V1, V2 reads its own PTs — there is no V2→V1 crossover. The bang-bang PTs (mux A channels 0 and 1) are sampled on ADC1 between every other channel, so they refresh at a few hundred Hz; the rest of mux A and all of mux B share the remaining ADC1 time.
+Unlike V1, V2 reads its own PTs — there is no V2→V1 crossover. The bang-bang PTs (mux A channels 0 and 1) are sampled on ADC1 between every other channel, so they refresh at a few hundred Hz; the rest of mux A shares the remaining ADC1 time. ADC2 scans mux C, the 16 DC-channel current senses, so those refresh together at roughly 60–70 Hz.
+
+Mux B (load cells and thermocouples) is not assembled on this board and is not scanned.
 
 ## 2. Command reference
 
@@ -94,9 +96,10 @@ Rejected with `PT_ERROR:bb_active` while either side is in `SUSTAIN` or `AUTO_VE
 
 ### 3.1 DAQ rows (20 Hz, best-effort)
 
+Current sense is `I = V / (20 × 0.1 Ω) = V / 2` (INA181A1 + 100 mΩ shunt). ADC2's 3.27 V reference puts full scale at **≈1.64 A** per channel; a reading pinned at that value is clipped, not real.
+
 ```
-t<f0>,t<f1>,...,t<f7>\n      # 8 load cells (raw V), mux C ch 0-7
-s<f0>,s<f1>,...,s<f15>\n     # Solenoid current (A), mux B
+s<f0>,s<f1>,...,s<f15>\n     # DC channel current (A), s<fi> = ACTUATE(i+1)
 p<f0>,p<f1>,...,p<f15>\n     # PT loop current (mA), mux A
 P<f0>,P<f1>\n                # BB PT pressure (PSI): scaled, tared, median-filtered
 ```
@@ -206,8 +209,8 @@ The operator must issue `a` then `b<side>1` to start bang-bang. Predictive cutof
 |---|---|---|
 | PT source | forwarded from V2 over crossover | local ADC1, mux A ch 0/1 at high priority |
 | `p…` row | 2 values, shunt volts | 16 values, loop current mA |
-| `s…` row | 12 values | 16 values |
-| `t…` row | 6 LC + 6 TC | 8 LC only — thermocouples not set up, mux C ch 8–15 not scanned |
+| `s…` row | 12 solenoid current values | 16 DC channel currents, mux C via ADC2 |
+| `t…` row | 6 LC + 6 TC | removed — load cells and thermocouples are not assembled |
 | `v…` row | — | INA230 bus voltages, 2 Hz |
 | DC outputs | Teensy GPIO | MCP23S17 `ACTUATE1…16` |
 | Arm | ARM/DISARM relay pair | `PIN_ARM` level only |

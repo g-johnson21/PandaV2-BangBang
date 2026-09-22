@@ -106,7 +106,7 @@ Three CD74HCT4067 16:1 muxes (U21, U24, U36) route analog inputs to the two ADCs
 | **2** | S_A3 | Mux A select bit 3 |
 
 ### Mux B — feeds ADC1 (via U24)
-Second 16:1 mux for ADC1 channel bank B (current sense or second voltage bank).
+Second 16:1 mux for ADC1 channel bank B: load cells and thermocouples. **Not assembled on this board** — the firmware does not scan mux B at all.
 
 | Teensy Pin | Net Name | Notes |
 |-----------|----------|-------|
@@ -116,12 +116,14 @@ Second 16:1 mux for ADC1 channel bank B (current sense or second voltage bank).
 | **22 / A8** | S_B3 | Mux B select bit 3 |
 
 ### Mux C — feeds ADC2 (via U36)
+DC channel current sense: the INA181 output for `ACTUATE(n)` is on mux C channel **16−n** — the mux is wired in reverse of the actuator numbering (measured: ACTUATE5 → ch 11). Firmware maps this via `currentMuxCh()` in `BoardConfig.h`, so the `s…` telemetry row is in actuator order.
+
 | Teensy Pin | Net Name | Notes |
 |-----------|----------|-------|
-| *unconfirmed* | S_C0 | CD74HCT4067 pin S0 (IC pin 10) — Teensy GPIO unconfirmed |
-| *unconfirmed* | S_C1 | CD74HCT4067 pin S1 (IC pin 11) — Teensy GPIO unconfirmed |
-| *unconfirmed* | S_C2 | CD74HCT4067 pin S2 (IC pin 14) — Teensy GPIO unconfirmed |
-| *unconfirmed* | S_C3 | CD74HCT4067 pin S3 (IC pin 13) — Teensy GPIO unconfirmed |
+| **35** | S_C0 | Mux C select bit 0 (CD74HCT4067 IC pin 10) |
+| **36** | S_C1 | Mux C select bit 1 (CD74HCT4067 IC pin 11) |
+| **33** | S_C2 | Mux C select bit 2 (CD74HCT4067 IC pin 14) |
+| **34** | S_C3 | Mux C select bit 3 (CD74HCT4067 IC pin 13) |
 
 > **EN wiring:** Mux C EN (IC pin 15) is hardwired to GND — always active, no firmware enable control. Same assumed for Mux A and B; confirm on ADC1 sheet. Because EN is always asserted, channel glitches during S-line transitions will reach the ADC input. Use the MCP3561RT's built-in OSR/DELAY to absorb settling (~115 ns mux + signal chain RC) before triggering a conversion after any channel change.
 
@@ -185,14 +187,12 @@ These appear in the schematic symbol but have no net connections visible on this
 | 2 | OUT2 / GPIO | Likely IRQ1 — confirm on ADC1[8A] |
 | 3–6 | GPIO | Likely S_A0..S_A3 — confirm on ADC1[8A] |
 | 9 | OUT1C / GPIO | Possibly mux enable or spare |
-| 14–17 (A0–A3) | Analog / GPIO | Possibly S_C0..S_C3 — confirm on ADC2[8A] |
 | 20–22 (A6–A8) | Analog / GPIO | Possibly S_B0..S_B3 partial — confirm on ADC1[8A] |
 | 24–25 (A10–A11) | Analog / GPIO | Unassigned or BREAK lines — confirm on RS-485 sheet |
 | 28–29 | RX7/TX7 | Serial7 — purpose unclear |
 | 30–31 | CRX3/CTX3 | CAN3 or Serial3 — purpose unclear |
 | 32 | OUT1B / GPIO | Unassigned |
-| 33 | MCLK2 / GPIO | Unassigned |
-| 34–35 | RX8/TX8 | Serial8 — purpose unclear |
+| 33–36 | GPIO | S_C2, S_C3, S_C0, S_C1 — confirmed (see Mux C) |
 | 40–41 (A16–A17) | Analog / GPIO | Unassigned (not CS_2/CS_3 — those are 38/37) |
 
 ---
@@ -202,6 +202,6 @@ These appear in the schematic symbol but have no net connections visible on this
 | Sheet | Status |
 |-------|--------|
 | ADC1[8A] | ✅ S_A0..S_A3 (pins 5,4,3,2), S_B0..S_B3 (pins 21,20,23,22), IRQ1 (pin 6) — confirmed |
-| ADC2[8A] | ✅ IRQ2 (pin 14), Mux C EN hardwired GND confirmed; ⚠️ S_C0..S_C3 Teensy GPIO numbers still needed |
+| ADC2[8A] | ✅ IRQ2 (pin 14), S_C0..S_C3 (pins 35,36,33,34), Mux C EN hardwired GND — confirmed |
 | Power[7A] | ✅ INA230 addresses confirmed (U8=0x40, U10=0x41, U12=0x44); pull-up value still to verify |
 | RS-485 / RTU V2[2C, 3C] | ✅ /RE hardwired GND, 120Ω termination confirmed; ❌ DE (BREAK[1..3]) not routed to Teensy on built board — hardware bodge required for TX |

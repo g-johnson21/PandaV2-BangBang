@@ -5,15 +5,16 @@
 // Sensor channel mapping and conversion for PandaV2.
 //
 // Mux A (16ch) → ADC1 CH0: PTs through INA132 difference amps
-// Mux B (16ch) → ADC1 CH1: solenoid current through INA181 (200x gain, 100mΩ shunt)
-// Mux C (16ch) → ADC2 CH0: LCs (ch 0-7) through INA317/INA826; ch 8-15 unused
-//
-// Channel counts are configurable — adjust if your board populates fewer.
+// Mux B (16ch) → ADC1 CH1: load cells + thermocouples — NOT ASSEMBLED on this
+//                          board, so mux B is not scanned at all. Restore the
+//                          bank here and in main.cpp if those parts go on.
+// Mux C (16ch) → ADC2 CH0: DC channel current sense through INA181A1
+//                          (x20 gain, 100mΩ shunt). ACTUATE(n) ↔ mux C ch
+//                          16-n (reversed; see currentMuxCh()).
 
 enum class SensorType : uint8_t {
     RAW,            // no conversion, report voltage
     PRESSURE,       // PT: voltage → PSI
-    LOAD_CELL,      // LC: voltage → lbf (or N)
     CURRENT_SENSE   // solenoid current: voltage → amps
 };
 
@@ -23,16 +24,13 @@ struct SensorCal {
     float offset;   // voltage offset
 };
 
-// ── Mux C channel layout ───────────────────────────────────────────
-// Channels 0..7  = load cells (INA317/INA826)
-// Channels 8..15 = not scanned (no sensors set up)
-// Adjust these if your board is wired differently.
-
-static constexpr uint8_t MUX_C_LC_START  = 0;
-static constexpr uint8_t MUX_C_LC_COUNT  = 8;
-
 static constexpr uint8_t NUM_PT_CH = 16;
-static constexpr uint8_t NUM_LC_CH = MUX_C_LC_COUNT;
+
+// DC current-sense channels, 1:1 with the expander outputs: curData index i is
+// the current through ACTUATE(i+1), read from mux C ch currentMuxCh(i+1).
+static constexpr uint8_t NUM_CURRENT_CH = NUM_MUX_C_CH;
+static_assert(NUM_CURRENT_CH == NUM_ACTUATORS,
+              "current sense is 1:1 with the DC actuator channels");
 
 // ── PT calibration ─────────────────────────────────────────────────
 // Converts INA132 output voltage → loop current in milliamps.
@@ -42,17 +40,19 @@ static constexpr uint8_t NUM_LC_CH = MUX_C_LC_COUNT;
 
 static constexpr SensorCal PT_DEFAULT = {SensorType::PRESSURE, 1.0f, 0.0f};
 
-// ── Load cell calibration ──────────────────────────────────────────
-// Default: report raw voltage. Replace with per-channel cal.
-
-static constexpr SensorCal LC_DEFAULT = {SensorType::LOAD_CELL, 1.0f, 0.0f};
-
 // ── Current sense conversion ───────────────────────────────────────
-// INA181 at 200x gain with 100mΩ shunt:
-// V_out = I_load * R_shunt * Gain = I_load * 0.1 * 200 = I_load * 20
-// So I_load = V_adc / 20
+// INA181A1 (fixed x20 gain) with a 100mΩ shunt (R43):
+//   V_out = I_load * R_shunt * Gain = I_load * 0.1 * 20 = I_load * 2
+//   I_load = V_adc / 2
+//
+// This matches V1's carried-over `sConstant = 0.5`, which was the same
+// amplifier chain expressed as A-per-volt.
+//
+// RANGE: ADC2's reference is ADC2_VREF_V (3.27 V), so the chain saturates at
+// 3.27 / 2 ≈ 1.64 A. Readings at that value are clipped, not real.
 
-static constexpr float CURRENT_SENSE_SCALE = 1.0f / 20.0f;  // A per V
+static constexpr float CURRENT_SENSE_SCALE = 0.5f;  // A per V (1 / (20 * 0.1Ω))
+static constexpr float CURRENT_FULL_SCALE_A = ADC2_VREF_V * CURRENT_SENSE_SCALE;
 
 // ── Conversion functions ───────────────────────────────────────────
 
@@ -60,11 +60,6 @@ inline float convertPT(float voltage, uint8_t ch) {
     (void)ch;
     // Return loop current in milliamps: mA = (V / R_shunt) * 1000
     return (voltage / PT_SHUNT_EFF_OHMS) * 1000.0f;
-}
-
-inline float convertLC(float voltage, uint8_t ch) {
-    (void)ch;
-    return (voltage - LC_DEFAULT.offset) * LC_DEFAULT.scale;
 }
 
 inline float convertCurrent(float voltage) {

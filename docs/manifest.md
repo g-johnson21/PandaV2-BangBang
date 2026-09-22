@@ -68,10 +68,10 @@ Firmware-relevant components only. Passives (R, C, L), LEDs, connectors, and sim
 - **Type:** Fixed-gain (×1 to ×10) difference amplifier, 18 V supply
 - **Firmware relevance:** Sets the gain in the analog chain for differential voltage inputs. Gain is set by external resistors — firmware reads the scaled output via ADC. Know the gain to convert ADC codes to engineering units.
 
-### INA181A4IDBVR — `U42_1..16` (16×)
+### INA181A1IDBVR — `U42_1..16` (16×)
 - **File:** `datasheets/INA181.pdf`
-- **Type:** Current sense amplifier, fixed ×200 gain (A4 variant), SOT-23-6
-- **Firmware relevance:** 16-channel current sense. At ×200 gain with the 100 mΩ shunt resistors (R43), full-scale output = 200 × 0.1 Ω × I_max. Derive I from ADC code: `I = V_out / (200 × R_shunt)`.
+- **Type:** Current sense amplifier, fixed ×20 gain (A1 variant), SOT-23-6
+- **Firmware relevance:** 16-channel DC-channel current sense, one per `ACTUATE1..16`, routed through mux C to ADC2 in reverse order (`ACTUATE(n)` → mux C ch 16−n). At ×20 gain with the 100 mΩ shunt resistors (R43): `I = V_out / (20 × R_shunt) = V_out / 2`. ADC2's 3.27 V reference puts full scale at ≈1.64 A per channel.
 
 ### INA317IDGKR — `U18_1..8` (8×)
 - **File:** `datasheets/INA317.pdf`

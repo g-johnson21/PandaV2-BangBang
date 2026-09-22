@@ -51,8 +51,15 @@ static constexpr uint8_t NUM_EXPANDER_CH = 16;
 // channels are populated — every loop and range check keys off this constant.
 static constexpr uint8_t NUM_ACTUATORS = 16;
 static constexpr uint8_t NUM_MUX_A_CH = 16; // voltage/differential via mux A
-static constexpr uint8_t NUM_MUX_B_CH = 16; // current sense via mux B
-static constexpr uint8_t NUM_MUX_C_CH = 16; // ADC2 channels via mux C
+// Mux B carries load cells + thermocouples, which are NOT assembled on this
+// board — it is not scanned. Its pins stay defined in pins.h.
+static constexpr uint8_t NUM_MUX_C_CH = 16; // DC current sense via mux C (ADC2)
+
+// Mux C is wired in reverse of the actuator numbering: ACTUATE(n) (1..16) is
+// sensed on mux C channel 16-n (measured: ACTUATE5 -> mux C ch 11).
+static constexpr uint8_t currentMuxCh(uint8_t actuator) {
+    return NUM_MUX_C_CH - actuator;
+}
 static constexpr uint8_t NUM_MAX_COMMANDS = 64;
 
 // ADC conversion watchdog. A healthy MCP3561RT conversion finishes in well
@@ -64,12 +71,10 @@ static constexpr uint32_t ADC_CONV_TIMEOUT_US = 10000;
 static constexpr char ID_PT = 'p';           // PT loop current (mA), all mux A channels
 static constexpr char ID_PT_PSI = 'P';       // BB PT pressure (PSI): scaled, tared, median-filtered
 static constexpr char ID_SOLENOID_CURRENT = 's';
-static constexpr char ID_LC = 't';           // load cells (raw V)
 static constexpr char ID_POWER = 'v';
 static constexpr char ID_GC_HEARTBEAT = 'h';
 
 // Conversion constants (carry forward from V1, recalibrate on V2 hardware)
-static constexpr float S_CONSTANT = 0.5f;
 static constexpr uint8_t DATA_DECIMALS = 5;
 
 // PT current-sense shunt effective resistance (Ω).

@@ -428,11 +428,28 @@ static void testActuateAllOnOff() {
     Serial.println();
 }
 
+// Latched: stays in the new state after returning to the menu, so channels can
+// be probed with a meter while energized. Any channel on -> all off.
+static void testActuateToggleAll() {
+    Serial.println("=== Toggle All Actuators ===");
+    if (ioexp.getState()) {
+        dcAllOff();
+        Serial.println("All channels OFF.");
+    } else {
+        ioexp.setAll(0xFFFF);
+        Serial.println("All channels ON (latched) - run this again to turn them off.");
+        if (!armed)
+            Serial.println("Note: board is DISARMED, so outputs won't energize (menu 6).");
+    }
+    Serial.println();
+}
+
 static void testActuation() {
     Serial.println("=== Actuation Test ===");
     Serial.println("  1  Toggle single channel");
     Serial.println("  2  Walk all channels");
     Serial.println("  3  All on / all off");
+    Serial.println("  4  Toggle all channels (latched)");
     Serial.print("> ");
 
     int sub = readSerialInt();
@@ -440,8 +457,65 @@ static void testActuation() {
         case 1: testActuateSingle();   break;
         case 2: testActuateWalk();     break;
         case 3: testActuateAllOnOff(); break;
+        case 4: testActuateToggleAll(); break;
         default: Serial.println("Invalid option."); break;
     }
+}
+
+// ── Current-sense check ─────────────────────────────────────────────
+// Localizes a flat current reading. First checks that ADC2 itself measures
+// known inputs, then
+// reads mux C channel N-1 with ACTUATE(N) off and on. INA181A1 x20 into
+// 100 mΩ: expect ~2 V per amp while energized.
+
+static void printAdc2Input(const char* label, MCP3561RT::Mux vinp) {
+    adc2.setMux(vinp, MCP3561RT::Mux::AGND);
+    delayMicroseconds(T_MUX_SETTLE_US);
+    ReadResult r = singleRead(adc2);
+    if (r.ok)
+        Serial.printf("  %-22s raw=%9d  %+.6f V\n", label, r.raw, r.voltage);
+    else
+        Serial.printf("  %-22s TIMEOUT\n", label);
+}
+
+static void testCurrentSense() {
+    Serial.println("=== Current-Sense Check (Mux C -> ADC2) ===");
+    Serial.printf("Actuator channel (1-%u): ", NUM_ACTUATORS);
+    int ch = readSerialInt();
+    if (ch < 1 || ch > (int)NUM_ACTUATORS) { Serial.println("Invalid channel."); return; }
+    const uint8_t muxCh = currentMuxCh((uint8_t)ch);
+
+    Serial.println("ADC2 self-check (all vs AGND):");
+    printAdc2Input("AGND   (expect ~0)", MCP3561RT::Mux::AGND);
+    printAdc2Input("REFIN+ (expect ~FS)", MCP3561RT::Mux::REFIN_P);
+    printAdc2Input("AVDD   (clips at FS)", MCP3561RT::Mux::AVDD);
+    setMuxChannel(MUX_C_PINS, muxCh);
+    printAdc2Input("CH0 (mux C COM)", MCP3561RT::Mux::CH0);
+
+    ReadResult off = readMuxChannel(adc2, MUX_C_PINS, MCP3561RT::Mux::CH0, muxCh);
+
+    const bool wasArmed = armed;
+    setArmed(true);
+    dcSetChannel((uint8_t)ch, true);
+    delay(DEFAULT_PULSE_MS);  // let the solenoid current reach steady state
+    ReadResult on = readMuxChannel(adc2, MUX_C_PINS, MCP3561RT::Mux::CH0, muxCh);
+    const uint16_t gpio = ioexp.readGpio();
+    dcSetChannel((uint8_t)ch, false);
+    setArmed(wasArmed);
+
+    Serial.printf("Mux C CH%02d / ACTUATE%d:\n", muxCh, ch);
+    if (off.ok)
+        Serial.printf("  OFF  %+.6f V  -> %.4f A\n", off.voltage, off.voltage * 0.5f);
+    else
+        Serial.println("  OFF  TIMEOUT");
+    if (on.ok)
+        Serial.printf("  ON   %+.6f V  -> %.4f A\n", on.voltage, on.voltage * 0.5f);
+    else
+        Serial.println("  ON   TIMEOUT");
+    // readGpio(): bit15 = ACTUATE1 ... bit0 = ACTUATE16
+    Serial.printf("  Expander pin for ACTUATE%d read back %s while ON\n", ch,
+                  (gpio >> (NUM_ACTUATORS - ch)) & 1 ? "HIGH" : "LOW (did not drive!)");
+    Serial.println();
 }
 
 // ── Menu ────────────────────────────────────────────────────────────
@@ -458,6 +532,7 @@ static void printMenu() {
     Serial.println("  6  Arm / disarm board");
     Serial.println("  7  Expander diagnostics");
     Serial.println("  8  Probe ADC2 + expander on SPI0");
+    Serial.println("  9  Current-sense check (ADC2 + one channel)");
     Serial.println("──────────────────────────────────");
     Serial.print("> ");
 }
@@ -519,6 +594,7 @@ void loop() {
         case 6: testArming();        break;
         case 7: testExpanderDiag();  break;
         case 8: testProbeBus0();     break;
+        case 9: testCurrentSense();  break;
         default: break;
     }
 

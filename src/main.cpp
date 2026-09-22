@@ -45,8 +45,7 @@
  *   'T<n>,<offset>'                     Set explicit PSI offset for channel n
  *
  * Telemetry:
- *   't...'  load cells, raw V (NUM_LC_CH)            20 Hz
- *   's...'  solenoid current, A (NUM_MUX_B_CH)       20 Hz
+ *   's...'  DC channel current, A (NUM_CURRENT_CH)   20 Hz
  *   'p...'  PT loop current, mA (NUM_PT_CH)          20 Hz
  *   'P...'  BB PT pressure, PSI (NUM_PSI_PT_CH)      20 Hz
  *   'v...'  INA230 bus voltages                       2 Hz
@@ -88,27 +87,22 @@ SequenceHandler seq(ioexp);
 // ── Scanner output buffers ──────────────────────────────────────────
 
 float muxA_data[NUM_MUX_A_CH] = {0};
-float muxB_data[NUM_MUX_B_CH] = {0};
 float muxC_data[NUM_MUX_C_CH] = {0};
 
 float ptData[NUM_PT_CH] = {0};
-float lcData[NUM_LC_CH] = {0};
-float curData[NUM_MUX_B_CH] = {0};
+float curData[NUM_CURRENT_CH] = {0};
 
+// Mux B (load cells + thermocouples) is unassembled, so ADC1 scans mux A only.
 MuxBank adc1Banks[] = {
     {{PIN_MUX_A_S0, PIN_MUX_A_S1, PIN_MUX_A_S2, PIN_MUX_A_S3},
      NUM_MUX_A_CH,
      MCP3561RT::Mux::CH0,
      muxA_data},
-    {{PIN_MUX_B_S0, PIN_MUX_B_S1, PIN_MUX_B_S2, PIN_MUX_B_S3},
-     NUM_MUX_B_CH,
-     MCP3561RT::Mux::CH1,
-     muxB_data},
 };
 
 MuxBank adc2Banks[] = {
     {{PIN_MUX_C_S0, PIN_MUX_C_S1, PIN_MUX_C_S2, PIN_MUX_C_S3},
-     MUX_C_LC_START + MUX_C_LC_COUNT, // only the load-cell channels
+     NUM_MUX_C_CH,
      MCP3561RT::Mux::CH0,
      muxC_data},
 };
@@ -119,7 +113,7 @@ MuxBank adc2Banks[] = {
 static const ScanSlot adc1FastSlots[NUM_PSI_PT_CH] = {{0, 0}, {0, 1}};
 static_assert(NUM_PSI_PT_CH == 2, "update adc1FastSlots when changing NUM_PSI_PT_CH");
 
-Scanner scanner1(adc1, adc1Banks, 2, adc1FastSlots, NUM_PSI_PT_CH);
+Scanner scanner1(adc1, adc1Banks, 1, adc1FastSlots, NUM_PSI_PT_CH);
 Scanner scanner2(adc2, adc2Banks, 1);
 
 // ── PT pressure view (filled on every completed fast PT sweep) ──────
@@ -769,11 +763,8 @@ static void updateConversions() {
   for (uint8_t i = 0; i < NUM_PT_CH; i++)
     ptData[i] = convertPT(muxA_data[i], i);
 
-  for (uint8_t i = 0; i < NUM_MUX_B_CH; i++)
-    curData[i] = convertCurrent(muxB_data[i]);
-
-  for (uint8_t i = 0; i < NUM_LC_CH; i++)
-    lcData[i] = convertLC(muxC_data[MUX_C_LC_START + i], i);
+  for (uint8_t i = 0; i < NUM_CURRENT_CH; i++)
+    curData[i] = convertCurrent(muxC_data[currentMuxCh(i + 1)]);
 }
 
 // ── Telemetry ───────────────────────────────────────────────────────
@@ -803,19 +794,18 @@ static void broadcastRows(const char *const *rows, size_t numRows) {
 }
 
 static void sendTelemetry() {
-  static char lcRow[256], sRow[512], pRow[512], psiRow[128];
+  static char sRow[512], pRow[512], psiRow[128];
 
   updateConversions();
 
-  CommsHandler::toCSVRow(lcData, ID_LC, NUM_LC_CH, lcRow, sizeof(lcRow));
-  CommsHandler::toCSVRow(curData, ID_SOLENOID_CURRENT, NUM_MUX_B_CH, sRow,
+  CommsHandler::toCSVRow(curData, ID_SOLENOID_CURRENT, NUM_CURRENT_CH, sRow,
                          sizeof(sRow));
   CommsHandler::toCSVRow(ptData, ID_PT, NUM_PT_CH, pRow, sizeof(pRow));
   CommsHandler::toCSVRow(ptPsiData, ID_PT_PSI, NUM_PSI_PT_CH, psiRow,
                          sizeof(psiRow));
 
-  const char *rows[] = {lcRow, sRow, pRow, psiRow};
-  broadcastRows(rows, 4);
+  const char *rows[] = {sRow, pRow, psiRow};
+  broadcastRows(rows, 3);
 }
 
 // Blocking I2C: only called from the loop's !bbActive() slow-work block. A
