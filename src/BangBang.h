@@ -41,6 +41,10 @@ struct BBConfig {
     // Auto-venting
     float    autovent_trigger  = 100000.0f; // press > this enters AUTO_VENT; huge sentinel = disabled
     bool     autovent_enabled  = false;     // when false, auto-trigger is ignored (manual still works)
+
+    // Deadband edges. Member functions only — the persisted layout is unchanged.
+    float hi() const { return setpoint_psi + deadband_psi * 0.5f; }
+    float lo() const { return setpoint_psi - deadband_psi * 0.5f; }
 };
 
 struct BBEepromBlock {
@@ -106,10 +110,9 @@ public:
     bool manualVent();
 
     // Manual close of vent: only exits AUTO_VENT (not ABORT). Returns true if
-    // the state changed. For safety, to exit AUTO_VENT the pressure must be at
-    // or below deadband-high; caller passes `force=true` to override (e.g. for
-    // debugging before a flow).
-    bool manualVentClose(bool force);
+    // the state changed. For safety the pressure must be at or below
+    // deadband-high; disarm is the override.
+    bool manualVentClose();
 
     // Latched abort. Can be triggered from any state. Cleared by disarm
     // (forceSafe) or by `b<side>0` while armed (operator acknowledge).
@@ -122,8 +125,10 @@ public:
     // Main loop tick. `armed` reflects the current master-arm state. When
     // !armed the controller self-safes and returns. `psiSettled` should be
     // false while the PT median filter is still warming up — sanity bounds are
-    // not enforced until it is true.
-    void update(bool armed, bool psiSettled = true, uint32_t pressureSampleMs = 0);
+    // not enforced until it is true. `pressureSampleMs` is the timestamp of the
+    // latest PT frame, or 0 when PT data is stale: an active controller then
+    // emits PT_STALE and forces safe.
+    void update(bool armed, bool psiSettled, uint32_t pressureSampleMs);
 
     // Accessors
     BBState          state()         const { return _state; }
@@ -137,9 +142,11 @@ public:
     bool             predictiveEnabled() const { return _predictiveEnabled; }
     const BBConfig&  config()        const { return _cfg; }
     char             busId()         const { return _busId; }
-    uint8_t          pressDcCh()     const { return _pressCh; }
-    uint8_t          ventDcCh()      const { return _ventCh; }
     bool             hasVentHw()     const { return _ventCh != BB_DC_CH_UNSET; }
+    // Closing the loop on live pressure (SUSTAIN or AUTO_VENT).
+    bool             isClosedLoop()  const {
+        return _state == BBState::SUSTAIN || _state == BBState::AUTO_VENT;
+    }
 
     // For the channel-ownership check in main.cpp. Only reserves the channel
     // while BB is actively driving it (non-DISABLED) — manual control is
@@ -151,7 +158,7 @@ public:
     bool ownsChannel(uint8_t ch1) const {
         if (_state == BBState::DISABLED) return false;
         if (_state == BBState::ABORT && !hasVentHw()) return false;
-        return ch1 == _pressCh || (ch1 == _ventCh && _ventCh != BB_DC_CH_UNSET);
+        return ch1 == _pressCh || (hasVentHw() && ch1 == _ventCh);
     }
 
 private:
@@ -169,7 +176,6 @@ private:
     BBState        _state         = BBState::DISABLED;
     bool           _pressOpen     = false;
     bool           _ventOpen      = false;
-    bool           _abortLatched  = false;
     bool           _predictiveEnabled = false;
     float          _lastPressure  = 0.0f;
     float          _pressureRate  = 0.0f;  // filtered psi/s
@@ -183,12 +189,13 @@ private:
     elapsedMillis  _openTimer;     // tracks how long press has been open (slow-press)
 
     // Helpers
+    void _setValve(uint8_t ch, bool& cached, const char* name, bool open,
+                   const char* reason);
     void _setPress(bool open, const char* reason);
     void _setVent(bool open, const char* reason);
     void _goto(BBState next, const char* reason);
     void _updateSustain();
     void _updateAutoVent();
-    void _updateAbort();
     void _updatePressureRate(uint32_t sampleMs);
     void _emitSafe(const char* cat, const char* detail);
 };

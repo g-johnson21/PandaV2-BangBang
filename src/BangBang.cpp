@@ -1,4 +1,5 @@
 #include "BangBang.h"
+#include "Checksum.h"
 #include <EEPROM.h>
 #include <math.h>
 
@@ -54,8 +55,6 @@ void BBController::_emitSafe(const char* cat, const char* detail) {
     const float pt = _ptArray[_ptIdx];
     if (!detail || detail[0] == '\0')
         snprintf(buf, sizeof(buf), "pt=%.1f", pt);
-    else if (strncmp(detail, "pt=", 3) == 0)
-        snprintf(buf, sizeof(buf), "%s", detail);
     else
         snprintf(buf, sizeof(buf), "%s,pt=%.1f", detail, pt);
     _emit(cat, _busId, buf);
@@ -102,24 +101,25 @@ void BBController::setPredictiveEnabled(bool enabled) {
 // matches. The channels are shared with manual S commands and sequences, so the
 // cache can be wrong — a "close" that trusted it could leave a valve open that
 // BB never opened. The VALVE event is emitted only on a cached-state change.
-void BBController::_setPress(bool open, const char* reason) {
-    if (_set) _set(_pressCh, open);
-    if (open == _pressOpen) return;
-    _pressOpen = open;
-    if (open) _openTimer = 0;
+void BBController::_setValve(uint8_t ch, bool& cached, const char* name,
+                             bool open, const char* reason) {
+    if (_set) _set(ch, open);
+    if (open == cached) return;
+    cached = open;
     char buf[48];
-    snprintf(buf, sizeof(buf), "press=%d,reason=%s", open ? 1 : 0, reason ? reason : "");
+    snprintf(buf, sizeof(buf), "%s=%d,reason=%s", name, open ? 1 : 0,
+             reason ? reason : "");
     _emitSafe("VALVE", buf);
+}
+
+void BBController::_setPress(bool open, const char* reason) {
+    if (open && !_pressOpen) _openTimer = 0;
+    _setValve(_pressCh, _pressOpen, "press", open, reason);
 }
 
 void BBController::_setVent(bool open, const char* reason) {
     if (!hasVentHw()) return;
-    if (_set) _set(_ventCh, open);
-    if (open == _ventOpen) return;
-    _ventOpen = open;
-    char buf[48];
-    snprintf(buf, sizeof(buf), "vent=%d,reason=%s", open ? 1 : 0, reason ? reason : "");
-    _emitSafe("VALVE", buf);
+    _setValve(_ventCh, _ventOpen, "vent", open, reason);
 }
 
 void BBController::_goto(BBState next, const char* reason) {
@@ -152,7 +152,6 @@ bool BBController::enableSustain() {
 void BBController::disableSustain() {
     if (_state == BBState::ABORT) {
         _setVent(false, "abort clear");
-        _abortLatched = false;
         _goto(BBState::DISABLED, "abort clear (b0)");
         _emitSafe("ABORT_CLEAR", "operator b0");
         return;
@@ -179,18 +178,15 @@ bool BBController::manualVent() {
     return true;
 }
 
-bool BBController::manualVentClose(bool force) {
+bool BBController::manualVentClose() {
     if (_state != BBState::AUTO_VENT) return false;
-    if (!force) {
-        const float hi = _cfg.setpoint_psi + _cfg.deadband_psi * 0.5f;
-        if (_lastPressure > hi) {
-            _emitSafe("AV_REJECT_CLOSE", "pressure still above deadband-high");
-            return false;
-        }
+    if (_lastPressure > _cfg.hi()) {
+        _emitSafe("AV_REJECT_CLOSE", "pressure still above deadband-high");
+        return false;
     }
     _setVent(false, "manualVentClose");
-    _goto(BBState::DISABLED, force ? "manualVentClose(force)" : "manualVentClose");
-    _emitSafe("AV_EXIT", force ? "forced" : "pressure ok");
+    _goto(BBState::DISABLED, "manualVentClose");
+    _emitSafe("AV_EXIT", "pressure ok");
     return true;
 }
 
@@ -199,13 +195,11 @@ bool BBController::latchAbort() {
         _emitSafe("AV_NO_HW", "abort requested but vent unset");
         // Still close press so we have at least *some* safing.
         _setPress(false, "abort-no-hw");
-        _abortLatched = true;
         _goto(BBState::ABORT, "abort (no vent HW)");
         return false;
     }
     _setPress(false, "abort");
     _setVent(true, "abort");
-    _abortLatched = true;
     _goto(BBState::ABORT, "latchAbort");
     return true;
 }
@@ -214,8 +208,7 @@ void BBController::forceSafe() {
     _setPress(false, "forceSafe");
     _setVent(false, "forceSafe");
     setPredictiveEnabled(false);
-    bool wasLatched = _abortLatched;
-    _abortLatched = false;
+    const bool wasLatched = (_state == BBState::ABORT);
     if (_state != BBState::DISABLED) {
         _goto(BBState::DISABLED, wasLatched ? "disarm (ABORT cleared)" : "forceSafe");
     }
@@ -230,8 +223,16 @@ void BBController::update(bool armed, bool psiSettled, uint32_t pressureSampleMs
     _lastPressure = _ptArray[_ptIdx];
     _updatePressureRate(pressureSampleMs);
 
+    // Loss of PT data must not leave a valve controlled from a stale sample.
+    // Fresh data does not auto-restart control; the operator must re-enable.
+    // ABORT stays latched regardless of PT health.
+    if (pressureSampleMs == 0 && isClosedLoop()) {
+        _emitSafe("PT_STALE", "PT timeout; forcing safe");
+        forceSafe();
+    }
+
     if (!armed) {
-        if (_state != BBState::DISABLED || _pressOpen || _ventOpen || _abortLatched) {
+        if (_state != BBState::DISABLED || _pressOpen || _ventOpen) {
             forceSafe();
         }
         return;
@@ -258,7 +259,7 @@ void BBController::update(bool armed, bool psiSettled, uint32_t pressureSampleMs
         case BBState::DISABLED:                       break;
         case BBState::SUSTAIN:    _updateSustain();   break;
         case BBState::AUTO_VENT:  _updateAutoVent();  break;
-        case BBState::ABORT:      _updateAbort();     break;
+        case BBState::ABORT:                          break; // latched; only forceSafe() clears
     }
 }
 
@@ -343,8 +344,8 @@ void BBController::_updateSustain() {
         return;
     }
 
-    const float hi = _cfg.setpoint_psi + _cfg.deadband_psi * 0.5f;
-    const float lo = _cfg.setpoint_psi - _cfg.deadband_psi * 0.5f;
+    const float hi = _cfg.hi();
+    const float lo = _cfg.lo();
 
     // Slow-press: if max_open_ms > 0 and press has been open for that long,
     // force a close and enforce wait_ms before another open is allowed.
@@ -364,6 +365,10 @@ void BBController::_updateSustain() {
                  "rate=%.1f,pred=%.1f,hi=%.1f,delay=%lu,horizon=%.1f",
                  _pressureRate, _projectedPressure, hi,
                  (unsigned long)_cfg.close_delay_ms, _predictionHorizonMs);
+        // De-energize before the event formatting/TX below: the whole point of
+        // predictive cutoff is to close early. _setPress re-writes the (now
+        // matching) output and emits VALVE after PRED_CLOSE as documented.
+        if (_set) _set(_pressCh, false);
         _emitSafe("PRED_CLOSE", buf);
         _setPress(false, "predictive cutoff");
         _switchTimer = 0;
@@ -379,7 +384,7 @@ void BBController::_updateSustain() {
 
 void BBController::_updateAutoVent() {
     // Exit condition: pressure has come back to or below deadband-high.
-    const float hi = _cfg.setpoint_psi + _cfg.deadband_psi * 0.5f;
+    const float hi = _cfg.hi();
     if (_lastPressure <= hi) {
         _setVent(false, "autovent exit");
         _emitSafe("AV_EXIT", "pressure below hi");
@@ -391,21 +396,10 @@ void BBController::_updateAutoVent() {
     }
 }
 
-void BBController::_updateAbort() {
-    // Latched — nothing to do. Valves were set at latchAbort(). Only
-    // forceSafe() (triggered by disarm) clears this state.
-}
-
 // ── EEPROM persistence ────────────────────────────────────────────────────
 
 static uint8_t computeCrc(const BBConfig& lox, const BBConfig& fuel) {
-    uint8_t crc = 0;
-    const uint8_t* p;
-    p = reinterpret_cast<const uint8_t*>(&lox);
-    for (size_t i = 0; i < sizeof(BBConfig); i++) crc ^= p[i];
-    p = reinterpret_cast<const uint8_t*>(&fuel);
-    for (size_t i = 0; i < sizeof(BBConfig); i++) crc ^= p[i];
-    return crc;
+    return xorChecksum(&fuel, sizeof(fuel), xorChecksum(&lox, sizeof(lox)));
 }
 
 void bbLoadEeprom(BBController& lox, BBController& fuel) {

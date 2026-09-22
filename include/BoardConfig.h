@@ -10,9 +10,9 @@ static const SPISettings SPI_ADC_SETTINGS(20000000, MSBFIRST, SPI_MODE0);
 //
 // The rate is set by the slowest device on the bus: the MCP23S17 is rated
 // 10 MHz max (datasheet p.1, "High-Speed SPI Interface: 10 MHz (maximum)").
-// Do not raise past 10 MHz — that puts the expander out of spec. ADC2 could do
-// 20 MHz but runs at 10 for bus consistency; SPI time is negligible next to its
-// OSR settling, so this costs nothing measurable.
+// Do not raise past 10 MHz — that puts the expander out of spec. It currently
+// runs at 1 MHz (a conservative bring-up value): an expander write takes
+// ~26 µs and an ADC2 sample read ~34 µs. 10 MHz would cut those ~10x.
 //
 // Both drivers still wrap every transfer in begin/endTransaction — that is what
 // makes sharing safe. This just removes the reconfiguration between devices.
@@ -93,6 +93,8 @@ static constexpr uint32_t TELEMETRY_INTERVAL_MS = 50;       // 20 Hz
 static constexpr uint32_t BB_HEARTBEAT_INTERVAL_MS = 1000;  // 1 Hz
 static constexpr uint32_t BB_DEBUG_INTERVAL_MS = 100;       // 10 Hz
 static constexpr uint32_t POWER_INTERVAL_MS = 500;          // 2 Hz
+// I/O expander liveness on the USB debug console (not RS-485).
+static constexpr uint32_t IOEXP_DEBUG_INTERVAL_MS = 1000;   // 1 Hz
 static constexpr size_t TX_PRIORITY_RESERVE = 256;
 
 // ── GC link watchdog ────────────────────────────────────────────────

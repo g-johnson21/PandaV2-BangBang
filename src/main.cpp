@@ -12,6 +12,7 @@
 
 #include "ArmingController.h"
 #include "BangBang.h"
+#include "Checksum.h"
 #include "CommsHandler.h"
 #include "Scanner.h"
 #include "SensorConfig.h"
@@ -152,9 +153,10 @@ static void broadcastLine(const char *msg) {
   comms2.sendLine(msg);
 }
 
-// BB → DC channel setter
+// BB → DC channel setter. BB owns these channels, so it bypasses the
+// ownership guard that applies to manual commands and sequence steps.
 static bool bbSetChannel(uint8_t ch1, bool state) {
-  return seq.setChannel(ch1, state);
+  return seq.setChannelRaw(ch1, state);
 }
 
 // BB → audit-event emitter. Format: EVT:<ms>:<cat>:<side>:<detail>
@@ -165,7 +167,8 @@ static void bbEmit(const char *cat, char side, const char *detail) {
   broadcastLine(buf);
 }
 
-// Manual S commands and sequence steps are blocked on channels BB is driving.
+// Ownership predicate for SequenceHandler: manual S commands and sequence
+// steps are refused on channels BB is driving.
 static bool isBbOwned(uint8_t ch1) {
   return bbLox.ownsChannel(ch1) || bbFuel.ownsChannel(ch1);
 }
@@ -173,16 +176,10 @@ static bool isBbOwned(uint8_t ch1) {
 // True while either controller is closing the loop on live pressure. Anything
 // that can stall the main loop (flash writes, I2C) or disturb the pressure
 // signal (tare) is held off while this is true.
-static bool bbActive() {
-  auto active = [](const BBController &c) {
-    return c.state() == BBState::SUSTAIN || c.state() == BBState::AUTO_VENT;
-  };
-  return active(bbLox) || active(bbFuel);
-}
+static bool bbActive() { return bbLox.isClosedLoop() || bbFuel.isClosedLoop(); }
 
-// EEPROM writes on Teensy 4 can stall for tens of ms while flash is erased —
-// longer than BB_PT_STALE_MS. Config changes apply to RAM immediately; the
-// flash write is deferred until no controller is active.
+// Config changes apply to RAM immediately; the EEPROM write is deferred to
+// the loop's slow-work block, which only runs while no controller is active.
 static bool bbSavePending = false;
 static bool tareSavePending = false;
 
@@ -197,11 +194,7 @@ struct PtTareEepromBlock {
 };
 
 static uint8_t ptTareComputeCrc(const PtTareEepromBlock &block) {
-  uint8_t crc = 0;
-  const uint8_t *p = reinterpret_cast<const uint8_t *>(block.offset_psi);
-  for (size_t i = 0; i < sizeof(block.offset_psi); i++)
-    crc ^= p[i];
-  return crc;
+  return xorChecksum(block.offset_psi, sizeof(block.offset_psi));
 }
 
 static void ptTareLoadEeprom() {
@@ -310,16 +303,36 @@ static void updatePtFrame() {
 // If U35 is absent or held in reset every setChannel() silently does nothing
 // while BB and sequences still report actuation. Probe it, and re-initialise
 // once on failure (safe here: callers only use this while disarmed/all-off).
-static bool ioexpOk = false;
-
 static bool checkExpander() {
-  if (!ioexp.probe()) {
+  bool ok = ioexp.probe();
+  if (!ok) {
     seq.begin(); // outputs → all off, pins → outputs
-    ioexpOk = ioexp.probe();
-  } else {
-    ioexpOk = true;
+    ok = ioexp.probe();
   }
-  return ioexpOk;
+  // USB console only — the RS-485 side gets WARN:IOEXP_INIT_FAIL / ARM_ERROR.
+  Serial.printf("IOEXP: %s  (CS=%u, addr=%u, IOCON=0x%02X, IODIRA=0x%02X, "
+                "IODIRB=0x%02X)\n",
+                ok ? "OK" : "NOT RESPONDING", PIN_IOEXP_CS, IOEXP_HW_ADDR,
+                ioexp.readRegister(MCP23S17::REG_IOCON),
+                ioexp.readRegister(MCP23S17::REG_IODIRA),
+                ioexp.readRegister(MCP23S17::REG_IODIRB));
+  if (!ok)
+    Serial.println("IOEXP: solenoid writes are going nowhere — check U35 /CS "
+                   "(pin 37), MISO (pin 39), /RESET (U35 pin 9) and VDD");
+  return ok;
+}
+
+// 1 Hz expander liveness on the USB console. probe() only touches DEFVALA,
+// which drives no pins, so this is safe while outputs are live and while
+// bang-bang is controlling. An OLAT readback alone would be ambiguous: with
+// every output off, a healthy chip and a silent one both read 0x0000.
+static void debugExpander() {
+  const bool alive = ioexp.probe();
+  uint16_t readback = 0;
+  const bool match = ioexp.verifyState(readback);
+  Serial.printf("IOEXP: %-14s outputs=0x%04X readback=0x%04X%s\n",
+                alive ? "RESPONDING" : "NOT RESPONDING", ioexp.getState(),
+                readback, (alive && !match) ? "  <-- OUTPUT MISMATCH" : "");
 }
 
 // ── Disarm (operator 'r' and watchdog stage 2 share this path) ──────
@@ -382,6 +395,13 @@ static BBController *bbTarget(const char *pkt, size_t minLen,
   return ctrl;
 }
 
+static bool requireArmed(CommsHandler &out) {
+  if (arming.isArmed())
+    return true;
+  out.sendLine("BB_ERROR:not_armed");
+  return false;
+}
+
 static void handleB(const char *pkt, CommsHandler &out) { // core config
   BBController *ctrl = bbTarget(pkt, 4, out);
   if (!ctrl)
@@ -437,10 +457,8 @@ static void handleLowerB(const char *pkt, CommsHandler &out) { // sustain on/off
     return;
   char stCh = pkt[2];
   if (stCh == '1') {
-    if (!arming.isArmed()) {
-      out.sendLine("BB_ERROR:not_armed");
+    if (!requireArmed(out))
       return;
-    }
     if (!hasFreshPt()) {
       out.sendLine("BB_ERROR:pt_stale");
       return;
@@ -462,16 +480,12 @@ static void handleLowerE(const char *pkt, CommsHandler &out) { // predictive
     out.sendLine("BB_ERROR:parse");
     return;
   }
-  BBController *ctrl = pickSide(pkt[1]);
-  if (!ctrl) {
-    out.sendLine("BB_ERROR:bad_side");
+  BBController *ctrl = bbTarget(pkt, 3, out);
+  if (!ctrl)
     return;
-  }
   if (pkt[2] == '1') {
-    if (!arming.isArmed()) {
-      out.sendLine("BB_ERROR:not_armed");
+    if (!requireArmed(out))
       return;
-    }
     ctrl->setPredictiveEnabled(true);
   } else if (pkt[2] == '0') {
     ctrl->setPredictiveEnabled(false);
@@ -486,13 +500,11 @@ static void handleLowerV(const char *pkt, CommsHandler &out) { // manual vent
     return;
   char stCh = pkt[2];
   if (stCh == '1') {
-    if (!arming.isArmed()) {
-      out.sendLine("BB_ERROR:not_armed");
+    if (!requireArmed(out))
       return;
-    }
     ctrl->manualVent();
   } else if (stCh == '0') {
-    ctrl->manualVentClose(false);
+    ctrl->manualVentClose();
   } else {
     out.sendLine("BB_ERROR:bad_arg");
   }
@@ -570,16 +582,15 @@ static bool handleCommand(char *packet, CommsHandler &out) {
 
   // 'a', 'f' and 'h' must be exactly one character, so a stray line that
   // merely starts with one of those letters can never arm, fire, or feed the
-  // watchdog.
-  const bool single = packet[1] == '\0';
+  // watchdog. ('r' is deliberately permissive: disarm always wins.)
+  if (strchr("afh", packet[0]) && packet[1] != '\0') {
+    out.sendLine("CMD_ERROR:parse");
+    return false;
+  }
 
   switch (packet[0]) {
 
   case 'a':
-    if (!single) {
-      out.sendLine("CMD_ERROR:parse");
-      break;
-    }
     if (!arming.isArmed() && !checkExpander()) {
       out.sendLine("ARM_ERROR:ioexp_fail");
       break;
@@ -588,7 +599,7 @@ static bool handleCommand(char *packet, CommsHandler &out) {
     out.sendLine("Arming!");
     break;
 
-  case 'r': // deliberately permissive: disarm always wins
+  case 'r':
     disarmAll();
     out.sendLine("Disarming!");
     out.sendLine("SEQ_ABORT: Outputs de-energized");
@@ -623,25 +634,15 @@ static bool handleCommand(char *packet, CommsHandler &out) {
       out.sendLine("CMD_ERROR:short_packet");
       break;
     }
-    unsigned chan = 0;
-    char ch = packet[1];
-    if (ch >= '0' && ch <= '9')
-      chan = ch - '0';
-    else if (ch >= 'A' && ch <= 'F')
-      chan = 10 + (ch - 'A');
-    else if (ch >= 'a' && ch <= 'f')
-      chan = 10 + (ch - 'a');
-    else {
-      out.sendLine("CMD_ERROR:bad_channel");
+    const int chan = SequenceHandler::parseChannel(packet[1]);
+    if (chan < 0) {
+      out.sendLine(isxdigit(packet[1]) ? "CMD_ERROR:chan_range"
+                                       : "CMD_ERROR:bad_channel");
       break;
     }
     unsigned state = packet[2] - '0';
     if (state > 1) {
       out.sendLine("CMD_ERROR:bad_state");
-      break;
-    }
-    if (chan < 1 || chan > NUM_ACTUATORS) {
-      out.sendLine("CMD_ERROR:chan_range");
       break;
     }
     // Energizing requires arm; de-energizing is always allowed.
@@ -651,21 +652,15 @@ static bool handleCommand(char *packet, CommsHandler &out) {
     }
 
     char buf[64];
-    if (isBbOwned(chan)) {
-      snprintf(buf, sizeof(buf), "CMD_ERROR: chan %u owned by BB", chan);
-    } else {
-      seq.setChannel(chan, state);
-      snprintf(buf, sizeof(buf), "Solenoid Command: %u | %u", chan, state);
-    }
+    if (seq.setChannel(chan, state) == SequenceHandler::SetResult::OWNED)
+      snprintf(buf, sizeof(buf), "CMD_ERROR: chan %d owned by BB", chan);
+    else
+      snprintf(buf, sizeof(buf), "Solenoid Command: %d | %u", chan, state);
     out.sendLine(buf);
     break;
   }
 
   case 'f': {
-    if (!single) {
-      out.sendLine("CMD_ERROR:parse");
-      break;
-    }
     if (!seq.hasSequence()) {
       out.sendLine("SEQ_ERROR: No sequence loaded");
       break;
@@ -679,15 +674,8 @@ static bool handleCommand(char *packet, CommsHandler &out) {
       break;
     }
     char buf[SEQ_LINE_BUF];
-    bool owned = false;
-    for (uint8_t i = 0; i < seq.getNumSteps() && !owned; i++) {
-      const uint8_t ch = seq.getStep(i).channel;
-      if (isBbOwned(ch)) {
-        snprintf(buf, sizeof(buf), "SEQ_ERROR: chan %u owned by BB", ch);
-        owned = true;
-      }
-    }
-    if (owned) {
+    if (const uint8_t owned = seq.firstOwnedChannel()) {
+      snprintf(buf, sizeof(buf), "SEQ_ERROR: chan %u owned by BB", owned);
       out.sendLine(buf);
       break;
     }
@@ -712,10 +700,6 @@ static bool handleCommand(char *packet, CommsHandler &out) {
     // Liveness only, and deliberately silent: at 5 Hz an acknowledgement per
     // beat would put avoidable traffic on the bus. The 1 Hz LINK: line is the
     // acknowledgement.
-    if (!single) {
-      out.sendLine("CMD_ERROR:parse");
-      break;
-    }
     if (!gcWatchdogArmed) {
       gcWatchdogArmed = true;
       bbEmit("COMMS_WD_ARM", '-', "GC heartbeat seen; link watchdog active");
@@ -778,6 +762,8 @@ static void serviceGcLinkWatchdog(uint32_t now) {
 }
 
 // ── Sensor conversion ───────────────────────────────────────────────
+// Only telemetry reads these arrays (BB and tare convert muxA_data directly),
+// so they are refreshed at telemetry rate rather than every loop.
 
 static void updateConversions() {
   for (uint8_t i = 0; i < NUM_PT_CH; i++)
@@ -797,21 +783,29 @@ static void updateConversions() {
 // control state.
 
 static bool tryWriteRows(CommsHandler &out, const char *const *rows,
-                         size_t numRows, size_t extraReserve = 0) {
+                         size_t numRows) {
   size_t frameLen = 0;
   for (size_t i = 0; i < numRows; i++)
     frameLen += strlen(rows[i]);
   const int available = out.availableForWrite();
-  if (available < 0 ||
-      (size_t)available < frameLen + TX_PRIORITY_RESERVE + extraReserve)
+  if (available < 0 || (size_t)available < frameLen + TX_PRIORITY_RESERVE)
     return false;
   for (size_t i = 0; i < numRows; i++)
     out.send(rows[i]);
   return true;
 }
 
+// Best-effort counterpart to broadcastLine(): each bus takes the whole frame
+// or none of it. Rows must carry their own trailing '\n'.
+static void broadcastRows(const char *const *rows, size_t numRows) {
+  tryWriteRows(comms, rows, numRows);
+  tryWriteRows(comms2, rows, numRows);
+}
+
 static void sendTelemetry() {
   static char lcRow[256], sRow[512], pRow[512], psiRow[128];
+
+  updateConversions();
 
   CommsHandler::toCSVRow(lcData, ID_LC, NUM_LC_CH, lcRow, sizeof(lcRow));
   CommsHandler::toCSVRow(curData, ID_SOLENOID_CURRENT, NUM_MUX_B_CH, sRow,
@@ -821,18 +815,12 @@ static void sendTelemetry() {
                          sizeof(psiRow));
 
   const char *rows[] = {lcRow, sRow, pRow, psiRow};
-  tryWriteRows(comms, rows, 4);
-  tryWriteRows(comms2, rows, 4);
+  broadcastRows(rows, 4);
 }
 
-// Teensy's Wire has fixed internal timeouts of ~16-50 ms per transaction
-// (Wire.setTimeout() does not bound them), so a stuck or vanished INA230 can
-// stall the loop past BB_PT_STALE_MS. Power telemetry is therefore skipped
-// entirely while BB is active, and a monitor that fails a read is dropped
-// (with a WARN) instead of being retried every cycle.
+// Blocking I2C: only called from the loop's !bbActive() slow-work block. A
+// monitor that fails a read is dropped (with a WARN) rather than retried.
 static void sendPowerTelemetry() {
-  if (bbActive())
-    return;
   char buf[128];
   INA230 *pmons[3] = {&pmon0, &pmon1, &pmon2};
   float voltages[3] = {0};
@@ -848,8 +836,7 @@ static void sendPowerTelemetry() {
   }
   CommsHandler::toCSVRow(voltages, ID_POWER, 3, buf, sizeof(buf));
   const char *rows[] = {buf};
-  tryWriteRows(comms, rows, 1);
-  tryWriteRows(comms2, rows, 1);
+  broadcastRows(rows, 1);
 }
 
 static const char *stateStr(BBState s) {
@@ -876,7 +863,7 @@ static void formatBbHeartbeat(const BBController &c, char *buf, size_t len) {
 //     <projected_close_psi>:<deadband_high_psi>:<close_delay_ms>:
 //     <total_horizon_ms>:<rate_valid01>:<predictive_enabled01>
 static void formatBbDebug(const BBController &c, char *buf, size_t len) {
-  const float hi = c.config().setpoint_psi + c.config().deadband_psi * 0.5f;
+  const float hi = c.config().hi();
   snprintf(buf, len, "BBD:%c:%s:%d:%.2f:%.2f:%.2f:%.2f:%lu:%.1f:%d:%d\n",
            c.busId(), stateStr(c.state()), c.isPressOpen() ? 1 : 0,
            c.lastPressure(), c.pressureRate(), c.projectedPressure(), hi,
@@ -899,8 +886,7 @@ static void sendBbHeartbeat(uint32_t now) {
   formatBbHeartbeat(bbFuel, fuel, sizeof(fuel));
   formatLinkStatus(now, link, sizeof(link));
   const char *rows[] = {lox, fuel, link};
-  tryWriteRows(comms, rows, 3);
-  tryWriteRows(comms2, rows, 3);
+  broadcastRows(rows, 3);
 }
 
 static void sendBbDebug() {
@@ -908,8 +894,7 @@ static void sendBbDebug() {
   formatBbDebug(bbLox, lox, sizeof(lox));
   formatBbDebug(bbFuel, fuel, sizeof(fuel));
   const char *rows[] = {lox, fuel};
-  tryWriteRows(comms, rows, 2);
-  tryWriteRows(comms2, rows, 2);
+  broadcastRows(rows, 2);
 }
 
 // ── Sequence completion reporting ───────────────────────────────────
@@ -936,8 +921,7 @@ static void reportAdcFaults() {
     snprintf(buf, sizeof(buf), "WARN:ADC%u_TIMEOUT:%lu\n", i + 1,
              (unsigned long)counts[i]);
     const char *rows[] = {buf};
-    tryWriteRows(comms, rows, 1);
-    tryWriteRows(comms2, rows, 1);
+    broadcastRows(rows, 1);
   }
 }
 
@@ -987,14 +971,12 @@ void setup() {
   comms.begin(RS485_BAUD);
   comms2.begin(RS485_BAUD);
 
-  // V2 PCB has TX differential pair (Y/Z) swapped on the RJ45.
-  // RX pair (A/B) is correct — do NOT set RXINV.
-  // TODO: fix Y/Z routing in next board revision
-  //
-  // Bus 1 (Serial7 → LPUART7)
-  LPUART7_CTRL |= LPUART_CTRL_TXINV;
-  // Bus 2 (Serial6 → LPUART1)
-  LPUART1_CTRL |= LPUART_CTRL_TXINV;
+  // TX runs at normal polarity. Both LPUARTs previously set TXINV to cancel a
+  // reported Y/Z swap on the RJ45, but on this board that made the stream
+  // arrive inverted at a straight-through receiver — a non-inverting adapter
+  // sampled every byte off its bit boundaries. If a future board really does
+  // swap Y/Z, invert that pair in the cable rather than here, so the wire
+  // polarity stays discoverable from the schematic.
 
   broadcastLine("BOOT");
   if (CrashReport)
@@ -1058,28 +1040,14 @@ void loop() {
   // 3. ADC scanning + conversions
   scanner1.update();
   scanner2.update();
-  updateConversions();
   updatePtFrame();
 
   // 4. Link watchdog — serviced before BB runs, so no controller actuates on
   //    this tick on the strength of a command from a link that is already gone.
   serviceGcLinkWatchdog(millis());
 
-  // 5. Bang-bang. Loss of PT data must not leave a valve controlled from a
-  //    stale sample. Fresh data does not auto-restart control; the operator
-  //    must explicitly enable sustain again. ABORT stays latched.
-  if (!hasFreshPt()) {
-    if (bbLox.state() == BBState::SUSTAIN ||
-        bbLox.state() == BBState::AUTO_VENT) {
-      bbEmit("PT_STALE", 'L', "PT timeout; forcing safe");
-      bbLox.forceSafe();
-    }
-    if (bbFuel.state() == BBState::SUSTAIN ||
-        bbFuel.state() == BBState::AUTO_VENT) {
-      bbEmit("PT_STALE", 'F', "PT timeout; forcing safe");
-      bbFuel.forceSafe();
-    }
-  }
+  // 5. Bang-bang. A 0 sample time tells an active controller the PT data is
+  //    stale; it then emits PT_STALE and forces itself safe.
   const uint32_t pressureSampleMs = hasFreshPt() ? lastPtMs : 0;
   const bool settled = ptPsiSettled();
   bbLox.update(arming.isArmed(), settled, pressureSampleMs);
@@ -1092,6 +1060,7 @@ void loop() {
   static uint32_t lastBbDebugMs = 0;
   static uint32_t lastPowerMs = 0;
   static uint32_t lastFaultCheckMs = 0;
+  static uint32_t lastIoexpDebugMs = 0;
   const uint32_t now = millis();
 
   if (now - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
@@ -1106,18 +1075,26 @@ void loop() {
     lastBbDebugMs = now;
     sendBbDebug();
   }
-  if (now - lastPowerMs >= POWER_INTERVAL_MS) {
-    lastPowerMs = now;
-    sendPowerTelemetry();
-  }
 
-  // 7. Sequence completion, faults, deferred config persistence
+  // 7. Sequence completion, faults, deferred slow work
   checkSequenceComplete();
   if (now - lastFaultCheckMs >= 1000) {
     lastFaultCheckMs = now;
     reportAdcFaults();
   }
+  if (now - lastIoexpDebugMs >= IOEXP_DEBUG_INTERVAL_MS) {
+    lastIoexpDebugMs = now;
+    debugExpander();
+  }
+  // Slow, blocking work — flash writes (tens of ms on Teensy 4) and I2C
+  // (Wire's fixed ~16-50 ms timeouts; Wire.setTimeout() does not bound
+  // them) — only runs while no controller is closing the loop, since either
+  // can stall past BB_PT_STALE_MS.
   if (!bbActive()) {
+    if (now - lastPowerMs >= POWER_INTERVAL_MS) {
+      lastPowerMs = now;
+      sendPowerTelemetry();
+    }
     if (bbSavePending) {
       bbSavePending = false;
       bbSaveEeprom(bbLox, bbFuel);

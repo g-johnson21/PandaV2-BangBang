@@ -40,6 +40,12 @@ public:
     // setChannel() would silently do nothing. Safe to call at any time.
     bool probe();
 
+    // Read-only health check: reads both OLATs back and compares them with the
+    // cached state. `readback` gets the device's view (same bit layout as
+    // getState()). No writes, so this is safe while outputs are live — a
+    // mismatch or an all-0x00/0xFF readback means the device is not answering.
+    bool verifyState(uint16_t& readback);
+
     // Write a test pattern to both OLATs and read it back. Returns true when
     // the readback matches, i.e. the SPI link and the device are both healthy.
     // Leaves all outputs OFF. Never call while anything is live on the bench.

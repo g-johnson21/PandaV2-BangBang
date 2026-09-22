@@ -9,19 +9,20 @@ void SequenceHandler::begin() {
     _exp.begin();
 }
 
-static int hexDigit(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-    return -1;
+int SequenceHandler::parseChannel(char c) {
+    int ch = -1;
+    if (c >= '0' && c <= '9') ch = c - '0';
+    else if (c >= 'A' && c <= 'F') ch = 10 + (c - 'A');
+    else if (c >= 'a' && c <= 'f') ch = 10 + (c - 'a');
+    return (ch >= 1 && ch <= NUM_ACTUATORS) ? ch : -1;
 }
 
 // One token: 's' <hex chan> <0|1> '.' <5 decimal digits>, nothing else.
 bool SequenceHandler::parseToken(const char* tok, SequenceStep& out) {
     if (strlen(tok) != 9 || tok[0] != 's' || tok[3] != '.') return false;
 
-    const int chan = hexDigit(tok[1]);
-    if (chan < 1 || chan > NUM_ACTUATORS) return false;
+    const int chan = parseChannel(tok[1]);
+    if (chan < 0) return false;
     if (tok[2] != '0' && tok[2] != '1') return false;
 
     uint32_t delay = 0;
@@ -87,10 +88,10 @@ void SequenceHandler::update() {
 
     if (!_inDelay) {
         SequenceStep& step = _steps[_currentStep];
-        // A channel owned by bang-bang is never written: doing so would fight
-        // the controller and desync its cached valve state.
-        const bool applied = !(_isOwned && _isOwned(step.channel));
-        if (applied) _exp.setChannel(step.channel, step.state);
+        // setChannel() refuses a channel owned by bang-bang: writing it would
+        // fight the controller and desync its cached valve state.
+        const bool applied =
+            setChannel(step.channel, step.state) == SetResult::OK;
         if (_onStep) _onStep(_currentStep, step, applied);
         _stepTimer = 0;
         _inDelay = true;
@@ -119,7 +120,22 @@ void SequenceHandler::setAllOff() {
     _exp.allOff();
 }
 
-bool SequenceHandler::setChannel(uint8_t channel, bool state) {
+SequenceHandler::SetResult SequenceHandler::setChannel(uint8_t channel,
+                                                      bool state) {
+    if (channel < 1 || channel > NUM_ACTUATORS) return SetResult::RANGE;
+    if (_isOwned && _isOwned(channel)) return SetResult::OWNED;
+    _exp.setChannel(channel, state);
+    return SetResult::OK;
+}
+
+bool SequenceHandler::setChannelRaw(uint8_t channel, bool state) {
     if (channel < 1 || channel > NUM_ACTUATORS) return false;
     return _exp.setChannel(channel, state);
+}
+
+uint8_t SequenceHandler::firstOwnedChannel() const {
+    if (!_isOwned) return 0;
+    for (uint8_t i = 0; i < _numSteps; i++)
+        if (_isOwned(_steps[i].channel)) return _steps[i].channel;
+    return 0;
 }

@@ -34,7 +34,6 @@ void CommsHandler::poll() {
                 // head must not run as a command either.
                 _overflow = false;
                 _rxPos = 0;
-                _dropped++;
             } else if (_rxPos > 0) {
                 _rxBuf[_rxPos] = '\0';
                 _ready = true;
@@ -55,7 +54,6 @@ void CommsHandler::poll() {
     if (!_ready && (_rxPos > 0 || _overflow) && _idleTimer >= PACKET_IDLE_MS) {
         _rxPos = 0;
         _overflow = false;
-        _dropped++;
     }
 }
 

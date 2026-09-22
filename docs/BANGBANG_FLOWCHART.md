@@ -117,7 +117,7 @@ flowchart TD
 | `b<side>0` | `handleLowerB` | `disableSustain()` | Any except `ABORT` |
 | `e<side>1` / `e<side>0` | `handleLowerE` | `setPredictiveEnabled()` | Enable requires `gArmed`; disable is always allowed |
 | `v<side>1` | `handleLowerV` | `manualVent()` | Any except `ABORT`, requires `gArmed` + `hasVentHw` |
-| `v<side>0` | `handleLowerV` | `manualVentClose(force=false)` | Only `AUTO_VENT`, requires pressure ≤ deadband-high |
+| `v<side>0` | `handleLowerV` | `manualVentClose()` | Only `AUTO_VENT`, requires pressure ≤ deadband-high |
 | `x<side>` | `handleLowerX` | `latchAbort()` | Any state |
 | `a` | inline | sets `gArmed = true` | Any state |
 | `r` | inline | `forceSafe()` both sides | Any state |
@@ -141,6 +141,7 @@ flowchart TD
 | `ABORT_ENTER` | `_goto(ABORT, …)` | `latchAbort()` or `SANITY_FAIL` |
 | `ABORT_CLEAR` | `forceSafe` | Disarm clears a latched abort |
 | `SANITY_FAIL` | `update` | PT NaN or outside `BB_PRESSURE_*_PSI` while non-`DISABLED` |
+| `PT_STALE` | `update` | `pressureSampleMs == 0` (no complete PT sweep for 50 ms) while `SUSTAIN`/`AUTO_VENT`; forces safe |
 | `OWN_CONFLICT` | `enableSustain`, `disableSustain`, `manualVent` | Command rejected by state preconditions |
 | `COMMS_WD_ARM` / `COMMS_LOSS` / `COMMS_OK` / `COMMS_DISARM` | `serviceGcLinkWatchdog` (main.cpp) | GC link armed / timed out / restored / silent past the disarm threshold. Side field is `-`, not `L`/`F` — these are link-wide, not per-side. |
 

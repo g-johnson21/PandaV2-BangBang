@@ -16,9 +16,6 @@ public:
     void poll();
 
     bool isPacketReady() const { return _ready; }
-
-    // Fragments and over-long lines discarded since boot.
-    uint32_t droppedCount() const { return _dropped; }
     char* takePacket();
 
     // TX helpers — assert DE, write, deassert DE
@@ -42,7 +39,6 @@ private:
     size_t _rxPos = 0;
     bool _ready = false;
     bool _overflow = false;
-    uint32_t _dropped = 0;
     elapsedMillis _idleTimer;
 
     void deAssert();

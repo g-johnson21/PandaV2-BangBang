@@ -4,3 +4,4 @@
 build/
 .pio/
 .vscode/
+__pycache__/

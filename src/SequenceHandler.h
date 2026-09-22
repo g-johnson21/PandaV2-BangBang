@@ -27,8 +27,14 @@ public:
     using StepFn = void (*)(uint8_t index, const SequenceStep& step, bool applied);
 
     // Returns true if a channel is currently reserved by another controller
-    // (bang-bang). Steps on such channels are skipped, never written.
+    // (bang-bang). setChannel() refuses such channels, so neither manual
+    // commands nor sequence steps can drive them.
     using OwnedFn = bool (*)(uint8_t channel);
+
+    enum class SetResult : uint8_t { OK, OWNED, RANGE };
+
+    // Hex digit → channel number, or -1 if not a valid channel (1..NUM_ACTUATORS).
+    static int parseChannel(char c);
 
     // Longest accepted command, including the leading 's'.
     static constexpr size_t MAX_COMMAND_LEN = RS485_RX_BUF - 1;
@@ -52,8 +58,15 @@ public:
     void cancelExecution();
     void setAllOff();
 
-    // Direct single-channel control (bypasses sequencing)
-    bool setChannel(uint8_t channel, bool state);
+    // Direct single-channel control for operators and sequence steps.
+    // Refuses channels the ownership check reports as reserved.
+    SetResult setChannel(uint8_t channel, bool state);
+
+    // Unguarded write for the owner itself (bang-bang). Range-checked only.
+    bool setChannelRaw(uint8_t channel, bool state);
+
+    // First channel in the loaded sequence that is currently reserved, or 0.
+    uint8_t firstOwnedChannel() const;
 
     void setStepCallback(StepFn fn) { _onStep = fn; }
     void setOwnershipCheck(OwnedFn fn) { _isOwned = fn; }

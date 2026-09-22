@@ -32,7 +32,13 @@ bool MCP23S17::setChannel(uint8_t channel, bool state) {
     else
         _state &= ~bit;
 
-    flushState();
+    // Only the port holding this channel changes, so write just that OLAT —
+    // half the traffic on a bus shared with ADC2. The write still happens when
+    // the bit was already set, so callers can re-assert a known state.
+    if (channel <= 8)
+        writeReg(REG_OLATB, (_state >> 8) & 0xFF);  // actuators 1-8
+    else
+        writeReg(REG_OLATA, _state & 0xFF);         // actuators 9-16
     return true;
 }
 
@@ -62,6 +68,13 @@ bool MCP23S17::probe() {
     // begin() set both ports to outputs; 0xFF is the power-on/reset default.
     if (readReg(REG_IODIRA) != 0x00 || readReg(REG_IODIRB) != 0x00) ok = false;
     return ok;
+}
+
+bool MCP23S17::verifyState(uint16_t& readback) {
+    uint8_t olatB = readReg(REG_OLATB);  // actuators 1-8
+    uint8_t olatA = readReg(REG_OLATA);  // actuators 9-16
+    readback = ((uint16_t)olatB << 8) | olatA;
+    return readback == _state;
 }
 
 bool MCP23S17::selfTest(uint16_t& readback) {
