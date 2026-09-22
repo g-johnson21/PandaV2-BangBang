@@ -29,7 +29,13 @@ void CommsHandler::poll() {
         _idleTimer = 0;
 
         if (c == '\n' || c == '\r') {
-            if (_rxPos > 0) {
+            if (_overflow) {
+                // Line was longer than the buffer: the tail is gone, so the
+                // head must not run as a command either.
+                _overflow = false;
+                _rxPos = 0;
+                _dropped++;
+            } else if (_rxPos > 0) {
                 _rxBuf[_rxPos] = '\0';
                 _ready = true;
             }
@@ -38,14 +44,18 @@ void CommsHandler::poll() {
 
         if (_rxPos < sizeof(_rxBuf) - 1) {
             _rxBuf[_rxPos++] = c;
+        } else {
+            _overflow = true;
         }
-        // If buffer full, silently drop until newline (corrupt packet)
     }
 
-    // Idle timeout — treat accumulated data as a packet
-    if (!_ready && _rxPos > 0 && _idleTimer >= PACKET_IDLE_MS) {
-        _rxBuf[_rxPos] = '\0';
-        _ready = true;
+    // Idle timeout — bytes with no terminator are line noise or a cut-off
+    // command. Discard them: executing a fragment could arm the board or fire
+    // a sequence on noise, and keeping them would corrupt the next real line.
+    if (!_ready && (_rxPos > 0 || _overflow) && _idleTimer >= PACKET_IDLE_MS) {
+        _rxPos = 0;
+        _overflow = false;
+        _dropped++;
     }
 }
 

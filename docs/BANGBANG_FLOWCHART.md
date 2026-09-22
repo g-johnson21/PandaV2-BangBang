@@ -15,7 +15,7 @@ Read these three diagrams together:
 stateDiagram-v2
     [*] --> DISABLED: cold start / forceSafe()
 
-    DISABLED --> SUSTAIN: GC 'b<side>1'\n(requires gArmed)\nemit BB_ON
+    DISABLED --> SUSTAIN: GC 'b<side>1'\n(requires gArmed)\npress+vent driven closed, emit BB_ON
     SUSTAIN --> DISABLED: GC 'b<side>0'\nemit BB_OFF
 
     SUSTAIN --> AUTO_VENT: pressure > autovent_trigger\n(only if autovent_enabled && hasVentHw)\nemit AV_ENTER
@@ -113,7 +113,7 @@ flowchart TD
 | `B<side><sp>,<db>,<wait>,<maxOpen>` | `handleB` | `configureCore()` + `bbSaveEeprom()` | Any state |
 | `D<side><closeMs>` | `handleD` | `configurePredictiveClose()` + `bbSaveEeprom()` | Any state |
 | `V<side><trig>,<autoOn>` | `handleV` | `configureVent()` + `bbSaveEeprom()` | Any state |
-| `b<side>1` | `handleLowerB` | `enableSustain()` | `DISABLED` and `gArmed` |
+| `b<side>1` | `handleLowerB` | `enableSustain()` (drives press + vent closed first) | `DISABLED` and `gArmed` |
 | `b<side>0` | `handleLowerB` | `disableSustain()` | Any except `ABORT` |
 | `e<side>1` / `e<side>0` | `handleLowerE` | `setPredictiveEnabled()` | Enable requires `gArmed`; disable is always allowed |
 | `v<side>1` | `handleLowerV` | `manualVent()` | Any except `ABORT`, requires `gArmed` + `hasVentHw` |
@@ -131,7 +131,7 @@ flowchart TD
 | `CFG_PUSH` | `configureCore/PredictiveClose/Vent` | Any successful config write (also during EEPROM load) |
 | `BB_ON` | `_goto(SUSTAIN, …)` | `enableSustain()` success |
 | `BB_OFF` | `_goto(DISABLED, …)` | `disableSustain()`, `AV_EXIT`, `forceSafe()` |
-| `VALVE` | `_setPress`, `_setVent` | Every edge on either solenoid, with reason string |
+| `VALVE` | `_setPress`, `_setVent` | Every cached-state edge on either solenoid, with reason string. The hardware write itself happens on every call, so a close also reaches a channel opened outside BB. |
 | `PRED_MODE` | `setPredictiveEnabled` | Explicit enable/disable, or automatic disable during `forceSafe()` |
 | `PRED_CLOSE` | `_updateSustain` | Rising-pressure projection reaches deadband-high while press is open; includes rate, projected pressure, threshold, mechanical delay, total horizon, and live PT. |
 | `AV_ENTER` | `_goto(AUTO_VENT, …)` | Manual `v…1` or auto-trigger |
@@ -150,6 +150,6 @@ Every row of this table is a line of code. If you add a new state edge, you add 
 
 ## 6. What's intentionally out of scope (phase 2)
 
-- **GC link watchdog.** Any recognised command from GC refreshes it; GC must send `h` at 5 Hz so a quiet hold is distinguishable from a severed cable. After 600 ms both controllers force-safe (`ABORT` exempt — its vent stays open); after 10 s the board disarms itself. Dormant until the first `h` of the boot, so it cannot nuisance-disarm against a GC that does not beat — watch `LINK:<armed>`. See §8 of `GC_USERS_GUIDE.md`.
+- **GC link watchdog.** Only an exact `h` line refreshes it; GC must send `h` at 5 Hz so a quiet hold is distinguishable from a severed cable. After 600 ms both controllers force-safe (`ABORT` exempt — its vent stays open); after 10 s the board disarms itself. Dormant until the first `h` of the boot, so it cannot nuisance-disarm against a GC that does not beat — watch `LINK:<armed>`. See §8 of `GC_USERS_GUIDE.md`.
 - **PT staleness detector.** Each complete fast-slot PT sweep on ADC1 refreshes the watchdog. If it expires after 50 ms while BB is active, that controller force-safes, emits `PT_STALE`, and requires explicit operator re-enable.
 - **AUTO_VENT → SUSTAIN auto-recovery.** Current behavior drops to `DISABLED` on `AV_EXIT` by design — requires explicit operator re-enable. Change only after an explicit ops decision.

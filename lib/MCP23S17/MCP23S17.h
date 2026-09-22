@@ -34,6 +34,12 @@ public:
     // Layout matches getState(): bit15 = ACTUATE1 ... bit0 = ACTUATE16.
     uint16_t readGpio();
 
+    // Non-intrusive link check: writes patterns to DEFVALA (drives no pins)
+    // and reads them back, then verifies IODIR shows every pin as an output.
+    // False means the chip is absent, held in reset, or mis-addressed — every
+    // setChannel() would silently do nothing. Safe to call at any time.
+    bool probe();
+
     // Write a test pattern to both OLATs and read it back. Returns true when
     // the readback matches, i.e. the SPI link and the device are both healthy.
     // Leaves all outputs OFF. Never call while anything is live on the bench.

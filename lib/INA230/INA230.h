@@ -12,6 +12,8 @@ public:
     bool begin(float shuntOhms = 0.1f, float maxCurrent_A = 5.0f);
 
     float busVoltage_V();
+    // Like busVoltage_V(), but reports an I2C failure instead of returning 0.
+    bool readBusVoltage_V(float& out);
     float shuntVoltage_mV();
     float current_A();
     float power_W();
@@ -44,4 +46,5 @@ private:
 
     void writeReg16(uint8_t reg, uint16_t val);
     uint16_t readReg16(uint8_t reg);
+    bool tryReadReg16(uint8_t reg, uint16_t& out);
 };

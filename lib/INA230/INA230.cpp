@@ -33,6 +33,13 @@ float INA230::busVoltage_V() {
     return raw * BUS_V_LSB;
 }
 
+bool INA230::readBusVoltage_V(float& out) {
+    uint16_t raw;
+    if (!tryReadReg16(REG_BUS_V, raw)) return false;
+    out = (int16_t)raw * BUS_V_LSB;
+    return true;
+}
+
 float INA230::shuntVoltage_mV() {
     int16_t raw = (int16_t)readReg16(REG_SHUNT_V);
     return raw * SHUNT_V_LSB * 1000.0f;
@@ -73,12 +80,19 @@ void INA230::writeReg16(uint8_t reg, uint16_t val) {
 }
 
 uint16_t INA230::readReg16(uint8_t reg) {
+    uint16_t val = 0;
+    tryReadReg16(reg, val);
+    return val;
+}
+
+bool INA230::tryReadReg16(uint8_t reg, uint16_t& out) {
     _wire.beginTransmission(_addr);
     _wire.write(reg);
-    _wire.endTransmission(false);
-    _wire.requestFrom(_addr, (uint8_t)2);
-    if (_wire.available() < 2) return 0;
+    if (_wire.endTransmission(false) != 0) return false;
+    if (_wire.requestFrom(_addr, (uint8_t)2) != 2 || _wire.available() < 2)
+        return false;
     uint8_t hi = _wire.read();
     uint8_t lo = _wire.read();
-    return (uint16_t(hi) << 8) | lo;
+    out = (uint16_t(hi) << 8) | lo;
+    return true;
 }

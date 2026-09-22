@@ -52,6 +52,18 @@ uint16_t MCP23S17::readGpio() {
     return ((uint16_t)portB << 8) | portA;
 }
 
+bool MCP23S17::probe() {
+    bool ok = true;
+    for (uint8_t p : {0xA5, 0x5A}) {
+        writeReg(REG_DEFVALA, p);
+        if (readReg(REG_DEFVALA) != p) ok = false;
+    }
+    writeReg(REG_DEFVALA, 0x00);
+    // begin() set both ports to outputs; 0xFF is the power-on/reset default.
+    if (readReg(REG_IODIRA) != 0x00 || readReg(REG_IODIRB) != 0x00) ok = false;
+    return ok;
+}
+
 bool MCP23S17::selfTest(uint16_t& readback) {
     // 0xA55A: alternating on both ports, so a stuck-high or stuck-low bus,
     // a dead port, or a swapped port all produce a distinct mismatch.

@@ -12,7 +12,7 @@ This is the canonical reference for every line sent to and received from PandaV2
 
 Both RS-485 buses are equivalent GC links. Commands are accepted on either; direct replies (`Arming!`, `BB_ERROR:…`, `SEQ_ACK:…`, …) go back on the bus the command arrived on. Periodic telemetry, `EVT:` lines, and `SEQ_STEP`/`SEQ_EXEC_COMPLETE` go out on both.
 
-Every packet is a single line terminated by `\n` (or `\r`). Packets time out after 100 ms idle (`PACKET_IDLE_MS`) even if no newline is seen, so a dropped delimiter is recoverable.
+Every packet is a single line terminated by `\n` (or `\r`). **Only terminated lines are executed.** Bytes followed by 100 ms of silence with no terminator (`PACKET_IDLE_MS`), and lines longer than 511 characters, are discarded rather than run, so line noise or a cut-off command can never act as a command.
 
 Unlike V1, V2 reads its own PTs — there is no V2→V1 crossover. The bang-bang PTs (mux A channels 0 and 1) are sampled on ADC1 between every other channel, so they refresh at a few hundred Hz; the rest of mux A and all of mux B share the remaining ADC1 time.
 
@@ -24,8 +24,8 @@ Unlike V1, V2 reads its own PTs — there is no V2→V1 crossover. The bang-bang
 
 | Command | Effect |
 |---|---|
-| `a` | Drive `PIN_ARM` (41) **high and hold it**. This enables the solenoid drive stage. Required before BB `b…1`, `e…1`, `v…1`. |
-| `r` | Drive `PIN_ARM` low. **Also**: `forceSafe()` on both BB controllers (press + vent closed, ABORT latch cleared, state → DISABLED), cancel any running sequence, and turn every expander output off. |
+| `a` | Drive `PIN_ARM` (41) **high and hold it**. This enables the solenoid drive stage. Required before `S…1`, `f`, and BB `b…1`, `e…1`, `v…1`. Must be exactly `a`. Before arming, the solenoid expander (U35) is probed (and re-initialised once if needed); if it does not respond the reply is `ARM_ERROR:ioexp_fail` and the board stays disarmed. |
+| `r` | Drive `PIN_ARM` low. Accepted with trailing characters — disarm always wins. **Also**: `forceSafe()` on both BB controllers (press + vent closed, ABORT latch cleared, state → DISABLED), cancel any running sequence, and turn every expander output off. |
 
 Response lines: `Arming!`, `Disarming!`, `SEQ_ABORT: Outputs de-energized`, optional `SEQ_READY:<raw>`.
 
@@ -37,15 +37,15 @@ DC channels are the MCP23S17 outputs `ACTUATE1…16`; the single-hex-digit proto
 
 | Command | Effect |
 |---|---|
-| `S<chHex><state>` | Drive DC channel `chHex` (1–F) to `state` (0 or 1). Replies `Solenoid Command: <n> \| <state>`. **Rejected with `CMD_ERROR: chan <n> owned by BB`** if that channel's BB controller is active (SUSTAIN, AUTO_VENT, or ABORT). Manual control is available whenever that side's BB is off, and also on its press channel while latched in ABORT with no vent hardware configured. Malformed input replies `CMD_ERROR:short_packet` / `bad_channel` / `bad_state` / `chan_range`. |
-| `s<chHex><state>.<5-digit-ms>,…` | Load a sequence (replaces any previous one). Replies one `SEQ_TOKEN idx=… chan=… state=… duration=…` per step, then `SEQ_ACK:count=<n>,raw=<cmd>`, or `SEQ_ERROR: Failed to parse sequence`. |
-| `f` | Fire the loaded sequence. Replies `SEQ_EXEC_START:count=<n>,raw=<cmd>` then `Firing sequence!`, or `SEQ_ERROR: No sequence loaded`. Each step emits `SEQ_STEP:index=…,chan=…,state=…,duration=…`; completion emits `SEQ_EXEC_COMPLETE` and `SEQ_READY:<raw>`. |
-
-As on V1, `S` and `f` are not gated on arm state in firmware; with `PIN_ARM` low the drive stage is unpowered.
+| `S<chHex><state>` | Drive DC channel `chHex` (1–F) to `state` (0 or 1). Replies `Solenoid Command: <n> \| <state>`. **Energizing (`state`=1) requires arm** (`CMD_ERROR:not_armed`); de-energizing is always allowed. **Rejected with `CMD_ERROR: chan <n> owned by BB`** if that channel's BB controller is active (SUSTAIN, AUTO_VENT, or ABORT). Manual control is available whenever that side's BB is off, and also on its press channel while latched in ABORT with no vent hardware configured. Malformed input replies `CMD_ERROR:short_packet` / `bad_channel` / `bad_state` / `chan_range`. |
+| `s<chHex><state>.<5-digit-ms>,…` | Load a sequence (replaces any previous one). Every token must be exactly `s` + one hex channel (1–F) + `0`/`1` + `.` + five digits; at most 64 steps and 511 characters. Parsing is all-or-nothing — nothing is ever truncated. Replies one `SEQ_TOKEN idx=… chan=… state=… duration=…` per step, then `SEQ_ACK:count=<n>,raw=<cmd>`, or `SEQ_ERROR: Failed to parse sequence`. Rejected with `SEQ_ERROR: busy` while a sequence is running. |
+| `f` | Fire the loaded sequence. Must be exactly `f`. Requires arm (`SEQ_ERROR: not armed`), no sequence already running (`SEQ_ERROR: busy`), and no step on a channel bang-bang currently owns (`SEQ_ERROR: chan <n> owned by BB`). Replies `SEQ_EXEC_START:count=<n>,raw=<cmd>` then `Firing sequence!`. Each step emits `SEQ_STEP:index=…,chan=…,state=…,duration=…`. If BB takes a channel after the fire, that step is not written and emits `SEQ_STEP_SKIPPED:index=…,chan=…,state=…,reason=bb_owned`. Running to the end emits `SEQ_EXEC_COMPLETE` and `SEQ_READY:<raw>`; an abort (`r` or comms-loss disarm) emits `SEQ_ABORT: Outputs de-energized` instead. |
 
 ### 2.3 Bang-bang configuration (persisted to EEPROM)
 
-All three take effect immediately on the running controller and are saved to EEPROM. Any parse failure replies `BB_ERROR:parse` and no state changes.
+All three take effect immediately on the running controller. Any parse failure replies `BB_ERROR:parse` and no state changes; `nan`/`inf` are rejected, setpoint must be 0–4000 psi and deadband >0–4000 psi.
+
+The EEPROM write is **deferred until neither side is in `SUSTAIN` or `AUTO_VENT`**: a Teensy flash write can stall the loop for tens of ms, longer than the PT stale guard. A config change made mid-run is live immediately but only persisted once control stops.
 
 | Command | Fields |
 |---|---|
@@ -59,7 +59,7 @@ Each emits `EVT:<ms>:CFG_PUSH:<side>:<k=v,...>` and rewrites the EEPROM block.
 
 | Command | Effect | Preconditions |
 |---|---|---|
-| `b<side>1` | Enter `SUSTAIN`. | Armed, BB currently `DISABLED`, PT data fresh (`BB_ERROR:pt_stale`) and median filter full (`BB_ERROR:pt_settling`). |
+| `b<side>1` | Drive this side's press and vent channels closed, then enter `SUSTAIN`. | Armed, BB currently `DISABLED`, PT data fresh (`BB_ERROR:pt_stale`) and median filter full (`BB_ERROR:pt_settling`). |
 | `b<side>0` | Leave `SUSTAIN` → `DISABLED`. Press closed. Vent untouched. **Also clears a latched `ABORT` without disarming** (operator acknowledge). | — |
 | `e<side>1` | Enable predictive cutoff for this armed session. Emits `PRED_MODE`. Not persisted. | Armed. |
 | `e<side>0` | Disable predictive cutoff. Rate calculation and `BBD:` telemetry continue. | Any. |
@@ -75,7 +75,7 @@ If a vent channel is unset in `BoardConfig.h`, `v<side>1` and `x<side>` emit `EV
 |---|---|
 | `h` | Liveness only. No reply. The first `h` of a boot also **arms** the link watchdog (see [section 8](#8-gc-link-watchdog)). |
 
-**GC must send `h` at 5 Hz for as long as it is connected.** Any other recognised command refreshes the watchdog too. Unrecognised lines (reply `CMD_ERROR:unknown`) do **not** — on V2 an idle bus can deliver noise as a "line", and that must not hold the watchdog open.
+**GC must send `h` at 5 Hz for as long as it is connected.** Only an exact `h` line refreshes the watchdog — other commands do not, so noise that happens to start with a command letter cannot hold it open after GC is gone.
 
 ### 2.6 PT tare (persisted to EEPROM)
 
@@ -88,7 +88,7 @@ Offsets are subtracted after converting loop current to PSI. They affect the `P�
 | `Tz` | Clear all tare offsets. |
 | `T<n>,<offset>` | Set explicit PSI offset for channel `n` (0 or 1). Example: `T0,12.345`. |
 
-Each emits `EVT:…:PT_TARE:…` and saves to EEPROM. Parse failures reply `PT_ERROR:parse`; `TL`/`TF` without fresh data reply `PT_ERROR:no_data`. Taring restarts that channel's median filter, so `b…1` answers `pt_settling` for a moment afterwards.
+Rejected with `PT_ERROR:bb_active` while either side is in `SUSTAIN` or `AUTO_VENT` (a tare steps the controlled pressure and restarts the median filter, which suspends the sanity bounds). Each emits `EVT:…:PT_TARE:…`; the EEPROM save is deferred the same way as BB config. Parse failures reply `PT_ERROR:parse`; `TL`/`TF` without fresh data reply `PT_ERROR:no_data`. Taring restarts that channel's median filter, so `b…1` answers `pt_settling` for a moment afterwards.
 
 ## 3. Telemetry reference
 
@@ -104,8 +104,11 @@ P<f0>,P<f1>\n                # BB PT pressure (PSI): scaled, tared, median-filte
 and at 2 Hz:
 
 ```
-v<f0>,v<f1>,v<f2>\n          # INA230 bus voltages (U8, U10, U12)
+v<f0>,v<f1>,v<f2>
+          # INA230 bus voltages (U8, U10, U12)
 ```
+
+The `v…` row pauses while either BB side is active: Teensy I²C transactions can block for ~50 ms on a faulty device, longer than the PT stale guard. A monitor that fails a read is dropped for the rest of the boot with `WARN:PMON<n>_READ_FAIL`.
 
 All values are floats with 5 decimals; the identifier character repeats before every value. Rows are skipped whenever the UART lacks room plus a 256-byte reserve, so command replies and safety events never wait behind telemetry.
 
@@ -129,7 +132,7 @@ LINK:<armed01>:<lost01>:<silent_ms>
 |---|---|
 | `armed01` | `1` once the watchdog has seen its first `h` this boot. **`0` means nothing is guarding the link.** |
 | `lost01` | `1` while the link is timed out (stage 1 tripped). |
-| `silent_ms` | ms since the last recognised command. `0` when un-armed. |
+| `silent_ms` | ms since the last `h`. `0` when un-armed. |
 
 ### 3.2c Predictive-close debug (10 Hz, one per side)
 
@@ -164,9 +167,11 @@ Every bang-bang `detail` ends with `,pt=<psi>`.
 | `OWN_CONFLICT` | Command rejected by BB state (e.g. enable while not DISABLED). |
 | `COMMS_WD_ARM` / `COMMS_LOSS` / `COMMS_DISARM` / `COMMS_OK` | Link watchdog armed / stage 1 / stage 2 / restored. Side is `-`. |
 
-### 3.4 Boot lines
+### 3.4 Boot lines and warnings
 
-`BOOT`, optional `WARN:CRASH_DETECTED`, `EVT:…:CFG_PUSH` ×3 per side (if EEPROM valid), `PT_TARE:ch0=…,ch1=…`, `PANDA_V2_INIT`, any `WARN:ADC1_INIT_FAIL` / `ADC2_INIT_FAIL` / `PMONn_INIT_FAIL`, `Panda Initialized!`.
+Boot: `BOOT`, optional `WARN:CRASH_DETECTED`, `EVT:…:CFG_PUSH` ×3 per side (if EEPROM valid), `PT_TARE:ch0=…,ch1=…`, `PANDA_V2_INIT`, any `WARN:ADC1_INIT_FAIL` / `ADC2_INIT_FAIL` / `PMONn_INIT_FAIL` / `IOEXP_INIT_FAIL`, `Panda Initialized!`.
+
+Runtime: `WARN:ADC<n>_TIMEOUT:<total>` (at most 1 Hz) whenever an ADC conversion is abandoned — the affected channels keep their last good value, so treat their telemetry as stale. `WARN:PMON<n>_READ_FAIL` when a power monitor stops answering.
 
 ## 4. Hardware channel map (`include/BoardConfig.h`)
 
@@ -207,7 +212,9 @@ The operator must issue `a` then `b<side>1` to start bang-bang. Predictive cutof
 | DC outputs | Teensy GPIO | MCP23S17 `ACTUATE1…16` |
 | Arm | ARM/DISARM relay pair | `PIN_ARM` level only |
 | GC links | `Serial2` only | both RS-485 buses |
-| Watchdog liveness | any line | any recognised command |
+| Watchdog liveness | any line | exact `h` only |
+| Unterminated / over-long lines | executed | discarded |
+| `S…1` / `f` | allowed disarmed | require arm; `f` rejects BB-owned channels |
 | Unknown command | ignored | `CMD_ERROR:unknown` |
 | Mass-flow setpoint correction (`M`, `MDOT_*`) | present | removed |
 
@@ -219,7 +226,7 @@ The watchdog is **dormant at boot** and arms on the first `h`, latching on until
 
 | Elapsed silence | Constant | Action |
 |---|---|---|
-| ≥ 600 ms | `COMMS_LOSS_MS` | `COMMS_LOSS`. Both BB controllers `forceSafe()` every tick while lost. `ABORT` is exempt (its vent stays open). |
+| ≥ 600 ms | `COMMS_LOSS_MS` | `COMMS_LOSS`. Both BB controllers `forceSafe()` — press and vent channels are driven closed in hardware, including one opened by hand while BB was off. `ABORT` is exempt (its vent stays open). Non-BB channels are left as they are until stage 2. |
 | ≥ 10 000 ms | `COMMS_DISARM_MS` | `COMMS_DISARM`. Identical to an operator `r`. |
 
 Traffic resuming emits `COMMS_OK` and clears the latch. **It does not restart anything** — re-arm and re-enable.

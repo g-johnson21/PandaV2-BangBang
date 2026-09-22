@@ -94,7 +94,8 @@ public:
     void setPredictiveEnabled(bool enabled);
 
     // Enter SUSTAIN (bang-bang control). Caller must have verified armed.
-    // Rejected if already non-DISABLED. Emits BB_ON / OWN_CONFLICT.
+    // Rejected if already non-DISABLED. Drives press and vent closed before
+    // entering SUSTAIN. Emits BB_ON / OWN_CONFLICT.
     bool enableSustain();
 
     // Leave SUSTAIN but stay DISABLED (press closed, vent untouched).

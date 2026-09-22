@@ -98,9 +98,13 @@ void BBController::setPredictiveEnabled(bool enabled) {
 
 // ── State transitions ─────────────────────────────────────────────────────
 
+// Valve writes always reach the hardware, even when the cached state already
+// matches. The channels are shared with manual S commands and sequences, so the
+// cache can be wrong — a "close" that trusted it could leave a valve open that
+// BB never opened. The VALVE event is emitted only on a cached-state change.
 void BBController::_setPress(bool open, const char* reason) {
-    if (open == _pressOpen) return;
     if (_set) _set(_pressCh, open);
+    if (open == _pressOpen) return;
     _pressOpen = open;
     if (open) _openTimer = 0;
     char buf[48];
@@ -110,8 +114,8 @@ void BBController::_setPress(bool open, const char* reason) {
 
 void BBController::_setVent(bool open, const char* reason) {
     if (!hasVentHw()) return;
-    if (open == _ventOpen) return;
     if (_set) _set(_ventCh, open);
+    if (open == _ventOpen) return;
     _ventOpen = open;
     char buf[48];
     snprintf(buf, sizeof(buf), "vent=%d,reason=%s", open ? 1 : 0, reason ? reason : "");
@@ -137,6 +141,10 @@ bool BBController::enableSustain() {
         _emitSafe("OWN_CONFLICT", "enable while non-disabled");
         return false;
     }
+    // Start from a known state: either channel may have been left energized by
+    // a manual S command or a sequence while this side was DISABLED.
+    _setPress(false, "enable sync");
+    _setVent(false, "enable sync");
     _goto(BBState::SUSTAIN, "GC enable");
     return true;
 }
