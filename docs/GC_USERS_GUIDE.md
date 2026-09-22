@@ -95,7 +95,7 @@ Each emits `EVT:…:PT_TARE:…` and saves to EEPROM. Parse failures reply `PT_E
 ### 3.1 DAQ rows (20 Hz, best-effort)
 
 ```
-t<f0>,t<f1>,...,t<f15>\n     # 8 LC (raw V) + 8 TC (°C)
+t<f0>,t<f1>,...,t<f7>\n      # 8 load cells (raw V), mux C ch 0-7
 s<f0>,s<f1>,...,s<f15>\n     # Solenoid current (A), mux B
 p<f0>,p<f1>,...,p<f15>\n     # PT loop current (mA), mux A
 P<f0>,P<f1>\n                # BB PT pressure (PSI): scaled, tared, median-filtered
@@ -201,7 +201,8 @@ The operator must issue `a` then `b<side>1` to start bang-bang. Predictive cutof
 |---|---|---|
 | PT source | forwarded from V2 over crossover | local ADC1, mux A ch 0/1 at high priority |
 | `p…` row | 2 values, shunt volts | 16 values, loop current mA |
-| `s…` / `t…` rows | 12 values each | 16 values each |
+| `s…` row | 12 values | 16 values |
+| `t…` row | 6 LC + 6 TC | 8 LC only — thermocouples not set up, mux C ch 8–15 not scanned |
 | `v…` row | — | INA230 bus voltages, 2 Hz |
 | DC outputs | Teensy GPIO | MCP23S17 `ACTUATE1…16` |
 | Arm | ARM/DISARM relay pair | `PIN_ARM` level only |

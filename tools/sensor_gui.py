@@ -34,17 +34,12 @@ import serial.tools.list_ports
 CALIB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sensor_calibrations.json")
 
 NUM_PT = 16
-NUM_TC = 8
 
 def _default_pt_calib() -> list[dict]:
     return [{"scale": 1.0, "offset": 0.0} for _ in range(NUM_PT)]
 
-def _default_tc_calib() -> list[dict]:
-    # offset in volts (zero-point shift), scale in °C/V
-    return [{"scale": 2217.294, "offset": 0.0} for _ in range(NUM_TC)]
-
-def load_calibrations() -> tuple[list[dict], list[dict]]:
-    """Load per-channel PT and TC calibrations from disk. Returns defaults on any error."""
+def load_calibrations() -> list[dict]:
+    """Load per-channel PT calibrations from disk. Returns defaults on any error."""
     try:
         with open(CALIB_FILE, "r") as f:
             data = json.load(f)
@@ -54,28 +49,22 @@ def load_calibrations() -> tuple[list[dict], list[dict]]:
             pt_result[i]["scale"]  = float(entry.get("scale",  1.0))
             pt_result[i]["offset"] = float(entry.get("offset", 0.0))
 
-        tc_result = _default_tc_calib()
-        for i, entry in enumerate(data.get("tc", [])[:NUM_TC]):
-            tc_result[i]["scale"]  = float(entry.get("scale",  2217.294))
-            tc_result[i]["offset"] = float(entry.get("offset", 0.0))
-
-        return pt_result, tc_result
+        return pt_result
     except Exception:
-        return _default_pt_calib(), _default_tc_calib()
+        return _default_pt_calib()
 
-def save_calibrations(pt_calib: list[dict], tc_calib: list[dict]):
-    """Persist per-channel PT and TC calibrations to disk."""
+def save_calibrations(pt_calib: list[dict]):
+    """Persist per-channel PT calibrations to disk."""
     data = {
         "pt": [{"scale": c["scale"], "offset": c["offset"]} for c in pt_calib],
-        "tc": [{"scale": c["scale"], "offset": c["offset"]} for c in tc_calib],
     }
     with open(CALIB_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 # ── Conversion helpers ───────────────────────────────────────────────────────
 
-# PT and TC: per-channel, loaded from file at startup and updated by calibration panels
-_pt_calib, _tc_calib = load_calibrations()
+# PT: per-channel, loaded from file at startup and updated by the calibration panel
+_pt_calib = load_calibrations()
 
 LC_SCALE      = 1.0
 LC_OFFSET     = 0.0
@@ -87,10 +76,6 @@ def convert_pt(v: float, ch: int) -> float:
 
 def convert_lc(v: float) -> float:
     return (v - LC_OFFSET) * LC_SCALE
-
-def convert_tc(v: float, ch: int, board_temp: float) -> float:
-    c = _tc_calib[ch]
-    return (v - c["offset"]) * c["scale"] + board_temp
 
 def convert_cur(v: float) -> float:
     return v * CURRENT_SCALE
@@ -142,7 +127,6 @@ class AppState:
         self._lock      = threading.Lock()
         self.pt         = [ChannelState() for _ in range(16)]
         self.lc         = [ChannelState() for _ in range(8)]
-        self.tc         = [ChannelState() for _ in range(8)]
         self.cur        = [ChannelState() for _ in range(16)]
         self.board_temp: float         = math.nan
         self.t_ms:       Optional[int]  = None
@@ -159,7 +143,6 @@ class AppState:
             self.err  = frame.get("err", 0)
             brd       = frame.get("brd")
             self.board_temp = brd if brd is not None else math.nan
-            board_t   = brd if (brd is not None and not math.isnan(brd)) else 25.0
 
             def _load(group, key, converter):
                 vals = frame.get(key, [])
@@ -188,16 +171,6 @@ class AppState:
             _load(self.lc,  "lc",  convert_lc)
             _load(self.cur, "cur", convert_cur)
 
-            tc_vals = frame.get("tc", [])
-            for i, ch in enumerate(self.tc):
-                v = tc_vals[i] if i < len(tc_vals) else None
-                if v is None or v != v:
-                    ch.raw = ch.converted = math.nan
-                    ch.ok = False
-                else:
-                    ch.raw = v
-                    ch.converted = convert_tc(v, i, board_t)
-                    ch.ok = True
 
             self._push_term(raw_line)
 
@@ -217,22 +190,6 @@ class AppState:
             for i, ch in enumerate(self.pt):
                 if not math.isnan(ch.raw):
                     ch.converted = convert_pt(ch.raw, i)
-
-    def reapply_tc_calib(self):
-        """Recompute converted values for all TC channels using current _tc_calib."""
-        with self._lock:
-            board_t = self.board_temp if not math.isnan(self.board_temp) else 25.0
-            for i, ch in enumerate(self.tc):
-                if not math.isnan(ch.raw):
-                    ch.converted = convert_tc(ch.raw, i, board_t)
-
-    def get_tc_raw(self, ch: int) -> float:
-        with self._lock:
-            return self.tc[ch].raw
-
-    def get_all_tc_raw(self) -> list[float]:
-        with self._lock:
-            return [c.raw for c in self.tc]
 
     def set_conn(self, state: str, msg: str, next_retry: Optional[float] = None,
                  term_line: Optional[str] = None):
@@ -258,7 +215,6 @@ class AppState:
             return {
                 "pt":         [(c.raw, c.converted, c.ok) for c in self.pt],
                 "lc":         [(c.raw, c.converted, c.ok) for c in self.lc],
-                "tc":         [(c.raw, c.converted, c.ok) for c in self.tc],
                 "cur":        [(c.raw, c.converted, c.ok) for c in self.cur],
                 "brd":        self.board_temp,
                 "t_ms":       self.t_ms,
@@ -652,7 +608,7 @@ class CalibrationPanel(tk.Frame):
             self._msg_var.set("No valid channel pairs found — check that readings were taken.")
             return
 
-        save_calibrations(_pt_calib, _tc_calib)
+        save_calibrations(_pt_calib)
         self._state.reapply_pt_calib()
         self._on_apply()
         self._msg_var.set(
@@ -714,298 +670,6 @@ class CalibrationPanel(tk.Frame):
                     rv["status"].set("ready / no verify")
                 else:
                     rv["status"].set("verified")
-
-# ── TC Calibration panel ──────────────────────────────────────────────────────
-
-class TCCalibrationPanel(tk.Frame):
-    """
-    Thermocouple two-point calibration:
-      1. Select channel (TC0–TC7 or All)
-      2. Reading 1 — enter known temp (°C), take voltage snapshot (e.g. ice bath 0 °C)
-      3. Reading 2 — enter known temp (°C), take voltage snapshot (e.g. boiling water)
-         → per-channel scale (°C/V) and offset (V) computed; board temp added at display time
-      4. Apply & Save — updates live conversion and writes sensor_calibrations.json
-      5. Reading 3 (verification) — enter known temp, take snapshot, shows residual
-    """
-
-    _CH_OPTIONS = ["All"] + [f"TC{i}" for i in range(NUM_TC)]
-
-    def __init__(self, parent, state: AppState, on_calib_applied, **kwargs):
-        super().__init__(parent, bg=BG_CALIB, **kwargs)
-        self._state    = state
-        self._on_apply = on_calib_applied
-
-        self._r1: list[Optional[float]] = [None] * NUM_TC
-        self._r2: list[Optional[float]] = [None] * NUM_TC
-        self._r3: list[Optional[float]] = [None] * NUM_TC
-
-        mono9  = tkfont.Font(family="Consolas", size=9)
-        mono9b = tkfont.Font(family="Consolas", size=9, weight="bold")
-        mono8  = tkfont.Font(family="Consolas", size=8)
-
-        # ── Title ─────────────────────────────────────────────────────
-        tk.Label(self, text="Thermocouple Calibration",
-                 bg=BG_CALIB, fg=FG_CALIB, font=mono9b,
-                 anchor="w", padx=8, pady=6).pack(fill="x")
-        tk.Frame(self, bg=FG_DIM, height=1).pack(fill="x", padx=8)
-
-        # ── Channel selector ──────────────────────────────────────────
-        ctrl = tk.Frame(self, bg=BG_CALIB)
-        ctrl.pack(fill="x", padx=8, pady=8)
-
-        tk.Label(ctrl, text="Channel:", bg=BG_CALIB, fg=FG, font=mono9).grid(
-            row=0, column=0, sticky="w", padx=(0, 4))
-        self._ch_var = tk.StringVar(value="All")
-        ch_menu = ttk.Combobox(ctrl, textvariable=self._ch_var,
-                               values=self._CH_OPTIONS, state="readonly", width=8,
-                               font=mono9)
-        ch_menu.grid(row=0, column=1, sticky="w")
-        ch_menu.bind("<<ComboboxSelected>>", self._on_channel_change)
-
-        # ── Three reading rows ────────────────────────────────────────
-        readings_frame = tk.Frame(self, bg=BG_CALIB)
-        readings_frame.pack(fill="x", padx=8, pady=(0, 6))
-
-        def _reading_row(parent, row, label, temp_var, btn_text, btn_cmd, note=""):
-            tk.Label(parent, text=label, bg=BG_CALIB, fg=FG_CALIB, font=mono9b,
-                     width=12, anchor="w").grid(row=row, column=0, sticky="w", pady=3)
-            tk.Label(parent, text="Known °C:", bg=BG_CALIB, fg=FG, font=mono9).grid(
-                row=row, column=1, sticky="w", padx=(8, 4))
-            tk.Entry(parent, textvariable=temp_var, width=10,
-                     bg=BTN_BG, fg=FG, insertbackground=FG, font=mono9,
-                     relief="flat").grid(row=row, column=2, sticky="w", padx=(0, 12))
-            tk.Button(parent, text=btn_text,
-                      bg=BTN_BG, fg=FG, activebackground=BTN_ACT, activeforeground=FG,
-                      font=mono9, relief="flat", padx=10, pady=3,
-                      command=btn_cmd).grid(row=row, column=3, sticky="w", padx=(0, 8))
-            if note:
-                tk.Label(parent, text=note, bg=BG_CALIB, fg=FG_DIM, font=mono8).grid(
-                    row=row, column=4, sticky="w")
-
-        self._temp1_var = tk.StringVar(value="0")
-        self._temp2_var = tk.StringVar(value="")
-        self._temp3_var = tk.StringVar(value="")
-
-        _reading_row(readings_frame, 0, "Reading 1",
-                     self._temp1_var, "Take Reading 1", self._take_r1,
-                     note="e.g. ice bath (0 °C)")
-        _reading_row(readings_frame, 1, "Reading 2",
-                     self._temp2_var, "Take Reading 2", self._take_r2,
-                     note="span point (known elevated temp)")
-        _reading_row(readings_frame, 2, "Reading 3",
-                     self._temp3_var, "Take Reading 3", self._take_r3,
-                     note="verification (take after Apply)")
-
-        # ── Action buttons ────────────────────────────────────────────
-        btn_row = tk.Frame(self, bg=BG_CALIB)
-        btn_row.pack(fill="x", padx=8, pady=(2, 6))
-
-        tk.Button(btn_row, text="Apply & Save",
-                  bg="#2d4a2d", fg=FG_GOOD,
-                  activebackground="#3a5e3a", activeforeground=FG_GOOD,
-                  font=mono9b, relief="flat", padx=12, pady=4,
-                  command=self._apply).pack(side="left", padx=(0, 8))
-
-        tk.Button(btn_row, text="Reset All Readings",
-                  bg=BTN_BG, fg=FG_DIM, activebackground=BTN_ACT, activeforeground=FG,
-                  font=mono9, relief="flat", padx=12, pady=4,
-                  command=self._reset_readings).pack(side="left")
-
-        # ── Status message ────────────────────────────────────────────
-        self._msg_var = tk.StringVar(value="Enter known temperatures and take readings 1 & 2, then Apply.")
-        tk.Label(self, textvariable=self._msg_var,
-                 bg=BG_CALIB, fg=FG_DIM, font=mono8,
-                 anchor="w", padx=8).pack(fill="x")
-
-        tk.Frame(self, bg=FG_DIM, height=1).pack(fill="x", padx=8, pady=(4, 0))
-
-        # ── Results table ─────────────────────────────────────────────
-        tbl_outer = tk.Frame(self, bg=BG_CALIB)
-        tbl_outer.pack(fill="both", expand=True, padx=8, pady=8)
-
-        self._tbl_canvas = tk.Canvas(tbl_outer, bg=BG_CALIB,
-                                     highlightthickness=0, bd=0)
-        tbl_vsb = tk.Scrollbar(tbl_outer, orient="vertical",
-                                command=self._tbl_canvas.yview, bg=BG_ALT)
-        self._tbl_canvas.configure(yscrollcommand=tbl_vsb.set)
-        tbl_vsb.pack(side="right", fill="y")
-        self._tbl_canvas.pack(side="left", fill="both", expand=True)
-
-        self._tbl_inner = tk.Frame(self._tbl_canvas, bg=BG_CALIB)
-        self._tbl_win = self._tbl_canvas.create_window(
-            (0, 0), window=self._tbl_inner, anchor="nw")
-        self._tbl_inner.bind("<Configure>", lambda _: self._tbl_canvas.configure(
-            scrollregion=self._tbl_canvas.bbox("all")))
-        self._tbl_canvas.bind("<Configure>", lambda e: self._tbl_canvas.itemconfig(
-            self._tbl_win, width=e.width))
-
-        hdrs = [("CH", 6), ("R1 (V)", 13), ("R2 (V)", 13),
-                ("Scale (°C/V)", 14), ("Offset (V)", 13),
-                ("R3 (V)", 13), ("Residual (°C)", 14), ("Status", 16)]
-        for col, (txt, w) in enumerate(hdrs):
-            tk.Label(self._tbl_inner, text=txt, bg=BG_ALT, fg=FG_HEAD,
-                     font=mono9b, width=w, anchor="center").grid(
-                         row=0, column=col, sticky="nsew", padx=1, pady=1)
-
-        self._row_vars: list[dict] = []
-        self._residual_lbls: list[tk.Label] = []
-        for i in range(NUM_TC):
-            bg = BG_CALIB if i % 2 == 0 else BG_ALT
-            rv = {k: tk.StringVar(value="—")
-                  for k in ("r1", "r2", "scale", "offset", "r3", "residual", "status")}
-            self._row_vars.append(rv)
-
-            tk.Label(self._tbl_inner, text=f"TC{i}", bg=bg, fg=FG_DIM,
-                     font=mono9, width=6, anchor="center").grid(
-                         row=i+1, column=0, sticky="nsew", padx=1)
-            for col, key in enumerate(("r1", "r2", "scale", "offset", "r3"), start=1):
-                w = hdrs[col][1]
-                tk.Label(self._tbl_inner, textvariable=rv[key],
-                         bg=bg, fg=FG, font=mono9, width=w, anchor="e", padx=4).grid(
-                             row=i+1, column=col, sticky="nsew", padx=1)
-
-            res_lbl = tk.Label(self._tbl_inner, textvariable=rv["residual"],
-                               bg=bg, fg=FG, font=mono9, width=14, anchor="e", padx=4)
-            res_lbl.grid(row=i+1, column=6, sticky="nsew", padx=1)
-            self._residual_lbls.append(res_lbl)
-
-            tk.Label(self._tbl_inner, textvariable=rv["status"],
-                     bg=bg, fg=FG_DIM, font=mono9, width=16, anchor="w", padx=4).grid(
-                         row=i+1, column=7, sticky="nsew", padx=1)
-
-        self._refresh_table()
-
-    # ── Internal helpers ─────────────────────────────────────────────
-
-    def _selected_channels(self) -> list[int]:
-        sel = self._ch_var.get()
-        if sel == "All":
-            return list(range(NUM_TC))
-        return [int(sel[2:])]  # "TC3" → 3
-
-    def _on_channel_change(self, _event=None):
-        self._refresh_table()
-
-    def _snap(self, store: list, label: str, next_hint: str):
-        raws = self._state.get_all_tc_raw()
-        chs  = self._selected_channels()
-        for ch in chs:
-            v = raws[ch]
-            store[ch] = None if math.isnan(v) else v
-        self._msg_var.set(f"{label} captured for {len(chs)} channel(s).  {next_hint}")
-        self._refresh_table()
-
-    def _take_r1(self):
-        self._snap(self._r1, "Reading 1", "Now take Reading 2 at the span temperature.")
-
-    def _take_r2(self):
-        self._snap(self._r2, "Reading 2", "Click Apply & Save, then take Reading 3 to verify.")
-
-    def _take_r3(self):
-        self._snap(self._r3, "Reading 3", "Residuals shown in table.")
-
-    def _apply(self):
-        global _tc_calib
-        try:
-            temp1 = float(self._temp1_var.get())
-        except ValueError:
-            self._msg_var.set("Enter a valid numeric value for Reading 1 °C.")
-            return
-        try:
-            temp2 = float(self._temp2_var.get())
-        except ValueError:
-            self._msg_var.set("Enter a valid numeric value for Reading 2 °C.")
-            return
-        if temp1 == temp2:
-            self._msg_var.set("Reading 1 and Reading 2 temperatures must differ.")
-            return
-
-        chs     = self._selected_channels()
-        updated = 0
-        for ch in chs:
-            r1 = self._r1[ch]
-            r2 = self._r2[ch]
-            if r1 is None or r2 is None:
-                continue
-            dv = r2 - r1
-            if abs(dv) < 1e-9:
-                continue
-            # Two-point fit: °C = scale * (V - offset)  (board temp added at display time)
-            scale  = (temp2 - temp1) / dv
-            offset = r1 - temp1 / scale
-            _tc_calib[ch]["scale"]  = scale
-            _tc_calib[ch]["offset"] = offset
-            updated += 1
-
-        if updated == 0:
-            self._msg_var.set("No valid channel pairs found — check that readings were taken.")
-            return
-
-        save_calibrations(_pt_calib, _tc_calib)
-        self._state.reapply_tc_calib()
-        self._on_apply()
-        self._msg_var.set(
-            f"Applied and saved calibration for {updated} channel(s).  "
-            "Take Reading 3 to verify.")
-        self._refresh_table()
-
-    def _reset_readings(self):
-        chs = self._selected_channels()
-        for ch in chs:
-            self._r1[ch] = None
-            self._r2[ch] = None
-            self._r3[ch] = None
-        self._msg_var.set("Readings cleared. Ready to start again.")
-        self._refresh_table()
-
-    def _refresh_table(self):
-        chs = set(self._selected_channels())
-        try:
-            temp3 = float(self._temp3_var.get())
-        except (ValueError, AttributeError):
-            temp3 = None
-
-        for i in range(NUM_TC):
-            rv  = self._row_vars[i]
-            r1  = self._r1[i]
-            r2  = self._r2[i]
-            r3  = self._r3[i]
-            cal = _tc_calib[i]
-
-            rv["r1"].set(f"{r1:.6f}" if r1 is not None else "—")
-            rv["r2"].set(f"{r2:.6f}" if r2 is not None else "—")
-            rv["scale"].set(f"{cal['scale']:.3f}")
-            rv["offset"].set(f"{cal['offset']:.6f}")
-            rv["r3"].set(f"{r3:.6f}" if r3 is not None else "—")
-
-            if r3 is not None and temp3 is not None:
-                board_t = self._state.board_temp
-                if math.isnan(board_t):
-                    board_t = 25.0
-                measured = convert_tc(r3, i, board_t)
-                residual = measured - temp3
-                rv["residual"].set(f"{residual:+.4f}")
-                self._residual_lbls[i].config(
-                    fg=FG_WARN if abs(residual) > 2.0 else FG_GOOD)
-            else:
-                rv["residual"].set("—")
-                self._residual_lbls[i].config(fg=FG)
-
-            if i not in chs:
-                rv["status"].set("—")
-            elif r1 is None:
-                rv["status"].set("awaiting R1")
-            elif r2 is None:
-                rv["status"].set("awaiting R2")
-            else:
-                dv = r2 - r1
-                if abs(dv) < 1e-9:
-                    rv["status"].set("no Δ voltage")
-                elif r3 is None:
-                    rv["status"].set("ready / no verify")
-                else:
-                    rv["status"].set("verified")
-
 
 # ── Main application ──────────────────────────────────────────────────────────
 
@@ -1090,14 +754,6 @@ class App(tk.Tk):
             on_calib_applied=self._on_calib_applied)
         self._calib_panel.pack(fill="both", expand=True)
 
-        # ── TC Calibration tab ────────────────────────────────────────
-        tc_calib_tab = tk.Frame(notebook, bg=BG_CALIB)
-        notebook.add(tc_calib_tab, text="  TC Calibration  ")
-        self._tc_calib_panel = TCCalibrationPanel(
-            tc_calib_tab, self._state,
-            on_calib_applied=self._on_calib_applied)
-        self._tc_calib_panel.pack(fill="both", expand=True)
-
     def _build_monitor_tab(self, parent: tk.Frame):
         """Sensor grid + terminal, as before."""
         # ── Vertical pane: sensor area (top) + terminal (bottom) ──────
@@ -1162,7 +818,7 @@ class App(tk.Tk):
     def _build_sensor_grid(self):
         pad = {"padx": 6, "pady": 6}
 
-        for c in range(3):
+        for c in range(2):
             self._sensor_inner.columnconfigure(c, weight=1, uniform="col")
 
         self._pt_tbl = SensorTable(
@@ -1171,19 +827,13 @@ class App(tk.Tk):
             channels=16, raw_unit="V", conv_unit="PSI", ch_prefix="PT")
         self._pt_tbl.grid(row=0, column=0, sticky="new", **pad)
 
-        self._tc_tbl = SensorTable(
-            self._sensor_inner,
-            title="Thermocouples  (×8)",
-            channels=8, raw_unit="V", conv_unit="°C", ch_prefix="TC")
-        self._tc_tbl.grid(row=0, column=1, sticky="new", **pad)
-
         self._cur_tbl = SensorTable(
             self._sensor_inner,
             title="Current  (×16)",
             channels=16, raw_unit="V", conv_unit="A", ch_prefix="CUR")
-        self._cur_tbl.grid(row=0, column=2, sticky="new", **pad)
+        self._cur_tbl.grid(row=0, column=1, sticky="new", **pad)
 
-        for tbl in (self._pt_tbl, self._tc_tbl, self._cur_tbl):
+        for tbl in (self._pt_tbl, self._cur_tbl):
             for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 tbl.bind(seq, self._on_canvas_scroll)
 
@@ -1239,8 +889,6 @@ class App(tk.Tk):
         # Tables
         for i, (raw, conv, ok) in enumerate(data["pt"]):
             self._pt_tbl.update_row(i, raw, conv, ok)
-        for i, (raw, conv, ok) in enumerate(data["tc"]):
-            self._tc_tbl.update_row(i, raw, conv, ok)
         for i, (raw, conv, ok) in enumerate(data["cur"]):
             self._cur_tbl.update_row(i, raw, conv, ok)
 

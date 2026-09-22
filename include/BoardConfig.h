@@ -64,12 +64,11 @@ static constexpr uint32_t ADC_CONV_TIMEOUT_US = 10000;
 static constexpr char ID_PT = 'p';           // PT loop current (mA), all mux A channels
 static constexpr char ID_PT_PSI = 'P';       // BB PT pressure (PSI): scaled, tared, median-filtered
 static constexpr char ID_SOLENOID_CURRENT = 's';
-static constexpr char ID_LCTC = 't';
+static constexpr char ID_LC = 't';           // load cells (raw V)
 static constexpr char ID_POWER = 'v';
 static constexpr char ID_GC_HEARTBEAT = 'h';
 
 // Conversion constants (carry forward from V1, recalibrate on V2 hardware)
-static constexpr float TC_CONSTANT = 2217.294f;
 static constexpr float S_CONSTANT = 0.5f;
 static constexpr uint8_t DATA_DECIMALS = 5;
 

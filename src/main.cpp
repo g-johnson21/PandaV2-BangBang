@@ -44,7 +44,7 @@
  *   'T<n>,<offset>'                     Set explicit PSI offset for channel n
  *
  * Telemetry:
- *   't...'  LC + TC (NUM_LC_CH + NUM_TC_CH)          20 Hz
+ *   't...'  load cells, raw V (NUM_LC_CH)            20 Hz
  *   's...'  solenoid current, A (NUM_MUX_B_CH)       20 Hz
  *   'p...'  PT loop current, mA (NUM_PT_CH)          20 Hz
  *   'P...'  BB PT pressure, PSI (NUM_PSI_PT_CH)      20 Hz
@@ -92,9 +92,7 @@ float muxC_data[NUM_MUX_C_CH] = {0};
 
 float ptData[NUM_PT_CH] = {0};
 float lcData[NUM_LC_CH] = {0};
-float tcData[NUM_TC_CH] = {0};
 float curData[NUM_MUX_B_CH] = {0};
-float boardTemp = 25.0f;
 
 MuxBank adc1Banks[] = {
     {{PIN_MUX_A_S0, PIN_MUX_A_S1, PIN_MUX_A_S2, PIN_MUX_A_S3},
@@ -109,7 +107,7 @@ MuxBank adc1Banks[] = {
 
 MuxBank adc2Banks[] = {
     {{PIN_MUX_C_S0, PIN_MUX_C_S1, PIN_MUX_C_S2, PIN_MUX_C_S3},
-     NUM_MUX_C_CH,
+     MUX_C_LC_START + MUX_C_LC_COUNT, // only the load-cell channels
      MCP3561RT::Mux::CH0,
      muxC_data},
 };
@@ -677,18 +675,7 @@ static void serviceGcLinkWatchdog(uint32_t now) {
 
 // ── Sensor conversion ───────────────────────────────────────────────
 
-static elapsedMillis boardTempTimer;
-static constexpr uint32_t BOARD_TEMP_INTERVAL_MS = 2000;
-
 static void updateConversions() {
-  // readBoardTemp() borrows ADC2, so only take it between scanner2 samples.
-  if (boardTempTimer >= BOARD_TEMP_INTERVAL_MS && scanner2.isIdle()) {
-    boardTempTimer = 0;
-    float t = scanner2.readBoardTemp();
-    if (t > -900.0f)
-      boardTemp = t;
-  }
-
   for (uint8_t i = 0; i < NUM_PT_CH; i++)
     ptData[i] = convertPT(muxA_data[i], i);
 
@@ -697,9 +684,6 @@ static void updateConversions() {
 
   for (uint8_t i = 0; i < NUM_LC_CH; i++)
     lcData[i] = convertLC(muxC_data[MUX_C_LC_START + i], i);
-
-  for (uint8_t i = 0; i < NUM_TC_CH; i++)
-    tcData[i] = convertTC(muxC_data[MUX_C_TC_START + i], i, boardTemp);
 }
 
 // ── Telemetry ───────────────────────────────────────────────────────
@@ -723,21 +707,16 @@ static bool tryWriteRows(CommsHandler &out, const char *const *rows,
 }
 
 static void sendTelemetry() {
-  static char lctcRow[512], sRow[512], pRow[512], psiRow[128];
+  static char lcRow[256], sRow[512], pRow[512], psiRow[128];
 
-  float lctc[NUM_LC_CH + NUM_TC_CH];
-  memcpy(lctc, lcData, sizeof(float) * NUM_LC_CH);
-  memcpy(lctc + NUM_LC_CH, tcData, sizeof(float) * NUM_TC_CH);
-
-  CommsHandler::toCSVRow(lctc, ID_LCTC, NUM_LC_CH + NUM_TC_CH, lctcRow,
-                         sizeof(lctcRow));
+  CommsHandler::toCSVRow(lcData, ID_LC, NUM_LC_CH, lcRow, sizeof(lcRow));
   CommsHandler::toCSVRow(curData, ID_SOLENOID_CURRENT, NUM_MUX_B_CH, sRow,
                          sizeof(sRow));
   CommsHandler::toCSVRow(ptData, ID_PT, NUM_PT_CH, pRow, sizeof(pRow));
   CommsHandler::toCSVRow(ptPsiData, ID_PT_PSI, NUM_PSI_PT_CH, psiRow,
                          sizeof(psiRow));
 
-  const char *rows[] = {lctcRow, sRow, pRow, psiRow};
+  const char *rows[] = {lcRow, sRow, pRow, psiRow};
   tryWriteRows(comms, rows, 4);
   tryWriteRows(comms2, rows, 4);
 }

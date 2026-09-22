@@ -1,5 +1,5 @@
 // Sensor Hardware Test — PandaV2
-// Interactive test for PTs, load cells, thermocouples, and current sense.
+// Interactive test for PTs, load cells, and current sense.
 // Run via USB serial. Select a test from the menu.
 
 #include <Arduino.h>
@@ -120,37 +120,7 @@ static void testLCSweep() {
     Serial.println();
 }
 
-// ── 3. Thermocouple sweep ──────────────────────────────────────────
-
-static void testTCSweep() {
-    Serial.println("=== Thermocouple Sweep (Mux C ch 8-15 → ADC2 CH0) ===");
-    if (!adc2_ok) { Serial.println("ADC2 not initialized."); return; }
-
-    float bTemp = readBoardTemp(adc2);
-    Serial.printf("Board temp (CJC): %.1f °C\n", bTemp);
-    if (bTemp < -900.0f) {
-        Serial.println("WARNING: board temp read failed, using 25 °C");
-        bTemp = 25.0f;
-    }
-
-    Serial.println("  CH  |     Raw     |   Voltage (V)  |  Temp (°C)");
-    Serial.println("  ----+-------------+----------------+-----------");
-
-    for (uint8_t i = 0; i < NUM_TC_CH; i++) {
-        uint8_t muxCh = MUX_C_TC_START + i;
-        ReadResult r = readMuxCh(adc2, MUX_C_PINS, MCP3561RT::Mux::CH0, muxCh);
-        if (r.ok) {
-            float temp = convertTC(r.voltage, i, bTemp);
-            Serial.printf("  %02d  | %10d  |  %+.6f     |  %.1f\n",
-                          i, r.raw, r.voltage, temp);
-        } else {
-            Serial.printf("  %02d  |    FAIL     |     ---        |   ---\n", i);
-        }
-    }
-    Serial.println();
-}
-
-// ── 4. Current sense sweep ─────────────────────────────────────────
+// ── 3. Current sense sweep ─────────────────────────────────────────
 
 static void testCurrentSweep() {
     Serial.println("=== Current Sense Sweep (Mux B → ADC1 CH1) ===");
@@ -172,39 +142,26 @@ static void testCurrentSweep() {
     Serial.println();
 }
 
-// ── 5. Full sweep (all sensors) ────────────────────────────────────
+// ── 4. Full sweep (all sensors) ────────────────────────────────────
 
 static void testFullSweep() {
     testPTSweep();
     testCurrentSweep();
     testLCSweep();
-    testTCSweep();
 }
 
-// ── 6. Continuous stream ───────────────────────────────────────────
+// ── 5. Continuous stream ───────────────────────────────────────────
 
 static void testStream() {
     Serial.println("=== Continuous Stream ===");
     Serial.println("Streaming all sensors. Send any character to stop.");
-    Serial.println("Format: PT0..15, LC0..7, TC0..7, CUR0..15");
+    Serial.println("Format: PT0..15, LC0..7, CUR0..15");
     Serial.println();
-
-    float bTemp = 25.0f;
-    uint32_t lastBoardTemp = 0;
 
     while (true) {
         if (Serial.available()) {
             Serial.read();
             break;
-        }
-
-        // Update board temp every 2s
-        if (millis() - lastBoardTemp > 2000) {
-            if (adc2_ok) {
-                float t = readBoardTemp(adc2);
-                if (t > -900.0f) bTemp = t;
-            }
-            lastBoardTemp = millis();
         }
 
         // PTs
@@ -235,20 +192,6 @@ static void testStream() {
             Serial.println();
         }
 
-        // Thermocouples
-        if (adc2_ok) {
-            Serial.print("TC:");
-            for (uint8_t i = 0; i < NUM_TC_CH; i++) {
-                ReadResult r = readMuxCh(adc2, MUX_C_PINS, MCP3561RT::Mux::CH0, MUX_C_TC_START + i);
-                if (i > 0) Serial.print(',');
-                if (r.ok)
-                    Serial.printf("%.1f", convertTC(r.voltage, i, bTemp));
-                else
-                    Serial.print("NaN");
-            }
-            Serial.println();
-        }
-
         // Current sense
         if (adc1_ok) {
             Serial.print("CUR:");
@@ -271,7 +214,7 @@ static void testStream() {
     Serial.println();
 }
 
-// ── 7. Board temperature ───────────────────────────────────────────
+// ── 6. Board temperature ───────────────────────────────────────────
 
 static void testBoardTemp() {
     Serial.println("=== Board Temperature (ADC internal sensor) ===");
@@ -287,7 +230,7 @@ static void testBoardTemp() {
     Serial.println();
 }
 
-// ── 8. ADC register dump ───────────────────────────────────────────
+// ── 7. ADC register dump ───────────────────────────────────────────
 
 static void testRegDump() {
     const char* regNames[] = {"ADCDATA","CONFIG0","CONFIG1","CONFIG2","CONFIG3","IRQ","MUX"};
@@ -312,12 +255,11 @@ static void printMenu() {
     Serial.println("──────────────────────────────────");
     Serial.println("  1  PT sweep (Mux A, 16ch)");
     Serial.println("  2  Load cell sweep (Mux C, 8ch)");
-    Serial.println("  3  Thermocouple sweep (Mux C, 8ch)");
-    Serial.println("  4  Current sense sweep (Mux B, 16ch)");
-    Serial.println("  5  Full sweep (all sensors)");
-    Serial.println("  6  Continuous stream");
-    Serial.println("  7  Board temperature");
-    Serial.println("  8  ADC register dump");
+    Serial.println("  3  Current sense sweep (Mux B, 16ch)");
+    Serial.println("  4  Full sweep (all sensors)");
+    Serial.println("  5  Continuous stream");
+    Serial.println("  6  Board temperature (ADC internal sensor)");
+    Serial.println("  7  ADC register dump");
     Serial.println("──────────────────────────────────");
     Serial.print("> ");
 }
@@ -358,12 +300,11 @@ void loop() {
     switch (cmd) {
         case 1: testPTSweep();      break;
         case 2: testLCSweep();      break;
-        case 3: testTCSweep();      break;
-        case 4: testCurrentSweep(); break;
-        case 5: testFullSweep();    break;
-        case 6: testStream();       break;
-        case 7: testBoardTemp();    break;
-        case 8: testRegDump();      break;
+        case 3: testCurrentSweep(); break;
+        case 4: testFullSweep();    break;
+        case 5: testStream();       break;
+        case 6: testBoardTemp();    break;
+        case 7: testRegDump();      break;
         default: break;
     }
 

@@ -46,13 +46,6 @@ public:
     // Conversions abandoned after ADC_CONV_TIMEOUT_US.
     uint32_t convTimeouts() const { return _timeouts; }
 
-    // True between conversions — safe to borrow the ADC (readBoardTemp).
-    bool isIdle() const { return _state == IDLE; }
-
-    // Read ADC internal temperature sensor (for TC cold junction compensation).
-    // Blocking — only call during setup or when isIdle().
-    float readBoardTemp();
-
 private:
     enum State : uint8_t { IDLE, WAIT_MUX, WAIT_CONV };
 

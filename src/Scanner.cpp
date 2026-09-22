@@ -104,27 +104,6 @@ void Scanner::selectMuxChannel(const MuxBank& bank, uint8_t ch) {
     }
 }
 
-float Scanner::readBoardTemp() {
-    // MCP3561RT internal temp sensor: set mux to TEMP_P vs TEMP_N,
-    // do a blocking one-shot, convert using datasheet formula.
-    // T(°C) = (V_temp - 0.492) / 0.00176 approximately.
-    // This is a rough estimate — datasheet says ~±2°C typical.
-    _adc.setMux(MCP3561RT::Mux::TEMP_P, MCP3561RT::Mux::TEMP_N);
-    delayMicroseconds(T_MUX_SETTLE_US);
-    _adc.trigger();
-
-    elapsedMicros timeout;
-    while (!_adc.dataReady()) {
-        if (timeout > ADC_CONV_TIMEOUT_US) return -999.0f;
-    }
-
-    int32_t raw;
-    if (!_adc.readRaw(raw)) return -999.0f;
-
-    float voltage = _adc.vref() * (float(raw) / 8388608.0f);
-    return (voltage - 0.492f) / 0.00176f;
-}
-
 void Scanner::advanceSlow() {
     if (!_hasSlow) return;
     // Step to the next channel that is not a fast slot. Bounded by the total
