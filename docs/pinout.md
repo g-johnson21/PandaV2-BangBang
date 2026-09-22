@@ -28,16 +28,16 @@ Teensy SPI1 (LPSPI3). Shared bus between the second ADC and the I/O expander.
 | 26 / A12 | MOSI2 | MCP3561RT U38 SDI, MCP23S17 SI — *inferred from LPSPI3 pin availability; confirm against ADC2[8A]* |
 | 27 / A13 | SCK2 | MCP3561RT U38 SCLK, MCP23S17 SCK — *inferred* |
 | 39 / A15 | MISO2 | MCP3561RT U38 SDO, MCP23S17 SO — *inferred* |
-| 36 / A16 | CS_2 | MCP3561RT U38 /CS — **confirmed** |
-| 37 / A17 | CS_3 | MCP23S17 U35 /CS — **confirmed** |
+| 37 | CS_3 | MCP23S17 U35 /CS — **confirmed on hardware** |
+| 38 / A14 | CS_2 | MCP3561RT U38 /CS — **confirmed on hardware** |
 
 **IRQ2** (MCP3561RT U38 /INT): **pin 14**. Active-low, open-drain.
 
-**CS pins (read from Microcontroller sheet image):**
+**CS pins (confirmed on hardware):**
 - **PIN_IOEXP_CS = 37** (MCP23S17 U35 chip select)
 - **PIN_ADC2_CS = 38** (MCP3561RT U38 chip select)
 
-> Both ADCs share their respective SPI bus with the downstream device (MCP23S17 on bus 1). CS lines are distinct. When the bus is idle, both CS must be deasserted high.
+> Both ADCs share their respective SPI bus with the downstream device (MCP23S17 on bus 1). CS lines are distinct. When the bus is idle, both CS must be deasserted high. The MCP23S17 driver wraps every transfer in `beginTransaction`/`endTransaction`, so actuator writes interleave safely with ADC2 conversions.
 
 ---
 
@@ -129,7 +129,9 @@ Second 16:1 mux for ADC1 channel bank B (current sense or second voltage bank).
 
 ## MCP23S17 I/O Expander (U35) — ACTUATE[1..16]
 
-SPI1 bus, CS = pin 37. Hardware address A0=A1=A2=GND → device address 0x00 (SPI opcode: write=0x40, read=0x41).
+SPI1 bus, CS = pin 37. Hardware address **A2=A1=A0 pulled HIGH → device address 7** (SPI opcode: write=`0x4E`, read=`0x4F`), per datasheet Figure 3-7 (`0100 A2 A1 A0 R/W`).
+
+> Address matching only takes effect once IOCON.HAEN is set. Before that the device answers any address, so a mismatched opcode appears to work for exactly one transaction — the IOCON write that enables HAEN — and then the chip goes silent with IODIR still at its `0xFF` power-on default (all pins inputs). §3.3.2 also requires the address pins be externally biased *even when HAEN = 0*.
 
 IOCON.HAEN must be set before address bits matter. Initialize all PORTB and PORTA pins as outputs, OLAT both registers to 0x00 before enabling outputs.
 
@@ -156,7 +158,7 @@ ACTUATE channels map to the 16-channel NPN transistor array (Q8_1..16, NSS30201M
 
 **INTA/INTB** (MCP23S17 interrupt outputs, pins 12/11): purpose unconfirmed on this sheet. Likely unconnected since the MCP23S17 is output-only here.
 
-**RESET** (pin 9): assumed pulled up to 3.3 V — confirm on Power sheet.
+**RESET** (pin 9): ⚠️ **not connected on the built board.** This pin has no internal pull-up and the datasheet lists it as an External Reset Input, so a floating input can hold the device in reset. Needs a bodge to 3.3 V (direct or via 10 kΩ), or to a spare GPIO held high.
 
 ---
 
@@ -191,8 +193,7 @@ These appear in the schematic symbol but have no net connections visible on this
 | 32 | OUT1B / GPIO | Unassigned |
 | 33 | MCLK2 / GPIO | Unassigned |
 | 34–35 | RX8/TX8 | Serial8 — purpose unclear |
-| 38 (A14) | Analog / GPIO | Possibly SPI1 CS or mux select |
-| 40–41 (A16–A17) | Analog / GPIO | Unassigned (not CS_2/CS_3 — those are 36/37) |
+| 40–41 (A16–A17) | Analog / GPIO | Unassigned (not CS_2/CS_3 — those are 38/37) |
 
 ---
 

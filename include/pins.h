@@ -24,6 +24,18 @@
 #define PIN_ADC2_CS     38  // MCP3561RT U38
 #define PIN_ADC2_IRQ    14  // active-low, open-drain; attach interrupt INPUT_PULLUP
 
+// MCP23S17 I/O expander (U35) shares this bus — see docs/pinout.md.
+// A2=A1=A0 pulled HIGH on the board → hardware address 7, so the SPI opcode is
+// 0x4E (write) / 0x4F (read), per datasheet Figure 3-7: 0100 A2 A1 A0 R/W.
+//
+// This MUST match the strapping. begin() sets IOCON.HAEN, which enables address
+// matching; get this wrong and the chip stops responding partway through init,
+// leaving IODIR at its 0xFF power-on default (all pins inputs, nothing driven).
+// Every transfer is wrapped in begin/endTransaction so it interleaves safely
+// with ADC2 conversions on the same bus.
+#define PIN_IOEXP_CS    37
+#define IOEXP_HW_ADDR   0x07
+
 // ---------------------------------------------------------------------------
 // I2C bus 0 — power monitors (INA230 x3: U8, U10, U12)
 // Hardware Wire (I2C0): SDA=18, SCL=19
@@ -83,13 +95,13 @@
 #define PIN_MUX_C_S3    34
 
 // ---------------------------------------------------------------------------
-// Arming — TODO: confirm pin assignments on V2 board.
-// V1 used pins 32/33 (now allocated to mux C). If arming is routed through
-// the I/O expander or a different GPIO, update these defines.
-// Candidates from free GPIO: 15, 16, 17, 25, 29, 30, 31, 32
+// Arming
+// PIN_ARM is a level held HIGH while armed (enables the solenoid drive) and
+// LOW while disarmed — see ArmingController and test/dc_channel_test.
+// PIN_DISARM is redundant on V2 and is deliberately not driven by firmware.
 // ---------------------------------------------------------------------------
-#define PIN_ARM     15  // PLACEHOLDER — verify on hardware
-#define PIN_DISARM  16  // PLACEHOLDER — verify on hardware
+#define PIN_ARM     41
+#define PIN_DISARM  16  // Redundant — not driven
 
 // ---------------------------------------------------------------------------
 // Power / housekeeping

@@ -20,6 +20,10 @@ public:
     void send(const char* msg);
     void sendLine(const char* msg);
 
+    // Free space in the UART TX buffer. Periodic telemetry checks this and is
+    // skipped rather than blocking when the bus is backed up.
+    int availableForWrite() { return _port.availableForWrite(); }
+
     // Format a float array as a CSV telemetry row: "<id><val>,<val>,...\n"
     static size_t toCSVRow(const float* data, char id, uint8_t count,
                            char* buf, size_t bufLen, uint8_t decimals = DATA_DECIMALS);

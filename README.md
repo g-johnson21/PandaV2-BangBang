@@ -18,6 +18,8 @@ lib/          driver libraries (one dir per IC)
 docs/
   datasheets/ IC datasheets
   manifest.md datasheet index and firmware notes per part
+  GC_USERS_GUIDE.md      GC command + telemetry protocol (canonical)
+  BANGBANG_FLOWCHART.md  bang-bang state machine and per-tick logic
 ```
 
 ## Safety notes

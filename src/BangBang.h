@@ -2,74 +2,196 @@
 #include <Arduino.h>
 #include "BoardConfig.h"
 
-// Firmware-side bang-bang pressure controller.
+// =============================================================================
+// Firmware-side bang-bang pressure controller (PandaV2).
 //
-// Two instances (LOX, Fuel) run autonomously once enabled. Each reads a single
-// PT channel from the live ptData[] array, drives a hardwired DC solenoid, and
-// enforces a minimum dwell time between valve transitions to prevent chatter.
+// One BBController instance per side (LOX, Fuel) runs autonomously once
+// armed and enabled. Each instance:
+//   - Reads a single PT channel from the local PSI array (ptPsiData[]).
+//   - Drives a "press" DC solenoid while in SUSTAIN state (bang-bang control).
+//   - Drives a "vent" DC solenoid while in AUTO_VENT or ABORT state.
+//   - Transitions between states autonomously (autovent_trigger) or by GC
+//     command (manual vent, manual abort).
 //
 // Safety invariants:
 //   - Always starts DISABLED on power-up, even if EEPROM config is present.
-//   - Disarm forces disable + valve closed (call disableNow()).
-//   - PT reading outside sanity bounds → auto-disable + valve closed.
-//   - Cannot enable unless the caller has verified arm state.
+//   - Disarm → forceSafe(): press closed, vent closed, state = DISABLED,
+//     abort-latch cleared. This is the only way to clear an ABORT latch.
+//   - PT reading outside BB_PRESSURE_MIN_PSI..BB_PRESSURE_MAX_PSI while armed →
+//     forceSafe() + SANITY_FAIL event. No self-recovery; operator must re-enable.
+//   - Cannot enter AUTO_VENT or ABORT if vent DC channel is unset (BB_DC_CH_UNSET).
+//     Command is rejected with AV_NO_HW event.
+//   - Every state transition, valve actuation, sanity violation, and config
+//     write emits a structured EVT: line to the telemetry stream so GC has a
+//     complete audit trail.
 //
-// Config is persisted to EEPROM (magic + CRC). Call bbLoadEeprom() / bbSaveEeprom()
-// from main.cpp — those helpers live outside the class to avoid EEPROM coupling.
+// EEPROM layout is magic + struct + CRC. Layout changes bump BB_EEPROM_MAGIC
+// in BoardConfig.h — old blobs are ignored, not migrated.
+// =============================================================================
 
+// ── Persisted config (one struct per side) ────────────────────────────────
 struct BBConfig {
-    float    setpoint_psi  = 200.0f;
-    float    deadband_psi  = 10.0f;
-    uint32_t wait_ms       = 500;
+    // Core bang-bang
+    float    setpoint_psi      = 200.0f;
+    float    deadband_psi      = 10.0f;   // symmetric, ±deadband/2 around setpoint
+    uint32_t wait_ms           = 500;     // minimum closed dwell before reopening
+    uint32_t max_open_ms       = 0;       // slow-press cap; 0 disables
+    uint32_t close_delay_ms    = 15;      // energized→mechanically closed delay
+
+    // Auto-venting
+    float    autovent_trigger  = 100000.0f; // press > this enters AUTO_VENT; huge sentinel = disabled
+    bool     autovent_enabled  = false;     // when false, auto-trigger is ignored (manual still works)
 };
 
-// Packed EEPROM block for both buses
 struct BBEepromBlock {
-    uint16_t magic;   // BB_EEPROM_MAGIC when valid
+    uint16_t magic;
     BBConfig lox;
     BBConfig fuel;
-    uint8_t  crc;     // XOR of all data bytes (lox + fuel structs)
+    uint8_t  crc;
 };
+
+// ── State machine ─────────────────────────────────────────────────────────
+enum class BBState : uint8_t {
+    DISABLED  = 0,  // no valves driven by BB; manual control allowed
+    SUSTAIN   = 1,  // bang-bang controlling press valve against setpoint
+    AUTO_VENT = 2,  // press closed, vent open, exits when pressure ≤ deadband-high
+    ABORT     = 3   // press closed, vent open, LATCHED until disarm
+};
+
+// Setter used by BBController to drive a DC channel. Returns false if the
+// channel is out of range. Implemented in main.cpp on top of SequenceHandler::setChannel.
+using BBSetChannelFn = bool (*)(uint8_t ch1, bool state);
+
+// Emit function for audit-trail events. Implemented in main.cpp to write to
+// the primary telemetry stream. First argument is a short category code (e.g.
+// "AV_ENTER"), side is 'L'/'F', detail is an optional human-readable tail.
+using BBEmitFn = void (*)(const char* cat, char side, const char* detail);
 
 class BBController {
 public:
-    // ptSrc   — pointer into ptData[]; dereferenced every update()
-    // dcCh    — 1-indexed DC channel (maps to SequenceHandler::setChannel)
-    // busId   — 'L' or 'F', used only for telemetry labels
-    BBController(const float* ptSrc, uint8_t dcCh, char busId);
+    // ptArray     — base of the PSI PT array (ptPsiData[]); element [pressPtIdx]
+    //               is read every update()
+    // pressPtIdx  — 0-indexed PT channel for the press-line PT
+    // pressDcCh   — 1-indexed DC channel for the press solenoid
+    // ventDcCh    — 1-indexed DC channel for the vent solenoid; BB_DC_CH_UNSET disables vent features
+    // busId       — 'L' or 'F', used for telemetry labels
+    BBController(const float* ptArray,
+                 uint8_t      pressPtIdx,
+                 uint8_t      pressDcCh,
+                 uint8_t      ventDcCh,
+                 char         busId);
 
-    void configure(float setpoint, float deadband, uint32_t waitMs);
+    // Wire outputs. Must be called once before update() runs.
+    void bindIO(BBSetChannelFn setChannel, BBEmitFn emit);
 
-    // Enable: only call after verifying armed. Returns false if already enabled.
-    bool enable();
+    // Per-side config mutators. All emit EVT:CFG_PUSH on success.
+    void configureCore(float setpoint, float deadband, uint32_t waitMs, uint32_t maxOpenMs);
+    void configurePredictiveClose(uint32_t closeDelayMs);
+    void configureVent(float triggerPsi, bool autoVentEnabled);
 
-    // Disable and force valve closed via the provided setChannel callback.
-    // Uses a function pointer so the class has no direct SequenceHandler dependency.
-    void disableNow(bool (*setChannel)(uint8_t, bool));
+    // Runtime-only predictive control gate. Defaults false and is cleared by
+    // forceSafe(), so EEPROM or a prior run can never silently re-enable it.
+    void setPredictiveEnabled(bool enabled);
 
-    // Call every loop iteration. armed must reflect current arm state.
-    // setChannel is called to open/close the solenoid.
-    void update(bool armed, bool (*setChannel)(uint8_t, bool));
+    // Enter SUSTAIN (bang-bang control). Caller must have verified armed.
+    // Rejected if already non-DISABLED. Emits BB_ON / OWN_CONFLICT.
+    bool enableSustain();
 
-    bool           isEnabled()     const { return _enabled; }
-    bool           isValveOpen()   const { return _valveOpen; }
-    float          lastPressure()  const { return _lastPressure; }
-    const BBConfig& config()       const { return _cfg; }
-    char           busId()         const { return _busId; }
+    // Leave SUSTAIN but stay DISABLED (press closed, vent untouched).
+    // Used by GC 'b<side>0'.
+    void disableSustain();
+
+    // Manual vent: enter AUTO_VENT. Rejected if vent DC unset (AV_NO_HW).
+    bool manualVent();
+
+    // Manual close of vent: only exits AUTO_VENT (not ABORT). Returns true if
+    // the state changed. For safety, to exit AUTO_VENT the pressure must be at
+    // or below deadband-high; caller passes `force=true` to override (e.g. for
+    // debugging before a flow).
+    bool manualVentClose(bool force);
+
+    // Latched abort. Can be triggered from any state. Cleared by disarm
+    // (forceSafe) or by `b<side>0` while armed (operator acknowledge).
+    bool latchAbort();
+
+    // Called on disarm or from setup(): unconditionally close both valves,
+    // clear ABORT latch, move to DISABLED. Always safe to call.
+    void forceSafe();
+
+    // Main loop tick. `armed` reflects the current master-arm state. When
+    // !armed the controller self-safes and returns. `psiSettled` should be
+    // false while the PT median filter is still warming up — sanity bounds are
+    // not enforced until it is true.
+    void update(bool armed, bool psiSettled = true, uint32_t pressureSampleMs = 0);
+
+    // Accessors
+    BBState          state()         const { return _state; }
+    bool             isPressOpen()   const { return _pressOpen; }
+    bool             isVentOpen()    const { return _ventOpen; }
+    float            lastPressure()  const { return _lastPressure; }
+    float            pressureRate()  const { return _pressureRate; }
+    float            projectedPressure() const { return _projectedPressure; }
+    float            predictionHorizonMs() const { return _predictionHorizonMs; }
+    bool             pressureRateValid() const { return _rateValid; }
+    bool             predictiveEnabled() const { return _predictiveEnabled; }
+    const BBConfig&  config()        const { return _cfg; }
+    char             busId()         const { return _busId; }
+    uint8_t          pressDcCh()     const { return _pressCh; }
+    uint8_t          ventDcCh()      const { return _ventCh; }
+    bool             hasVentHw()     const { return _ventCh != BB_DC_CH_UNSET; }
+
+    // For the channel-ownership check in main.cpp. Only reserves the channel
+    // while BB is actively driving it (non-DISABLED) — manual control is
+    // allowed whenever this side's BB is off. Exception: ABORT latched with
+    // no vent hardware has nothing left to drive (press was already forced
+    // closed by latchAbort()'s no-vent-HW path, and there's no vent channel
+    // to hold) — release the press channel so GC has a manual way to manage
+    // venting, without weakening the ABORT-only-clears-on-disarm invariant.
+    bool ownsChannel(uint8_t ch1) const {
+        if (_state == BBState::DISABLED) return false;
+        if (_state == BBState::ABORT && !hasVentHw()) return false;
+        return ch1 == _pressCh || (ch1 == _ventCh && _ventCh != BB_DC_CH_UNSET);
+    }
 
 private:
-    const float* _ptSrc;
-    uint8_t      _dcCh;
-    char         _busId;
-    BBConfig     _cfg;
-    bool         _enabled   = false;
-    bool         _valveOpen = false;
-    float        _lastPressure = 0.0f;
-    elapsedMillis _switchTimer;
+    // Hardware binding
+    const float*   _ptArray;      // base pointer; indexed by _ptIdx
+    uint8_t        _ptIdx;
+    uint8_t        _pressCh;
+    uint8_t        _ventCh;
+    char           _busId;
+    BBSetChannelFn _set   = nullptr;
+    BBEmitFn       _emit  = nullptr;
 
-    void _closeValve(bool (*setChannel)(uint8_t, bool));
+    // Runtime
+    BBConfig       _cfg;
+    BBState        _state         = BBState::DISABLED;
+    bool           _pressOpen     = false;
+    bool           _ventOpen      = false;
+    bool           _abortLatched  = false;
+    bool           _predictiveEnabled = false;
+    float          _lastPressure  = 0.0f;
+    float          _pressureRate  = 0.0f;  // filtered psi/s
+    float          _projectedPressure = 0.0f;
+    float          _predictionHorizonMs = 0.0f;
+    float          _sampleIntervalMs = 0.0f;
+    float          _rateSamplePressure = 0.0f;
+    uint32_t       _rateSampleMs  = 0;
+    bool           _rateValid     = false;
+    elapsedMillis  _switchTimer;   // debounce / slow-press wait
+    elapsedMillis  _openTimer;     // tracks how long press has been open (slow-press)
+
+    // Helpers
+    void _setPress(bool open, const char* reason);
+    void _setVent(bool open, const char* reason);
+    void _goto(BBState next, const char* reason);
+    void _updateSustain();
+    void _updateAutoVent();
+    void _updateAbort();
+    void _updatePressureRate(uint32_t sampleMs);
+    void _emitSafe(const char* cat, const char* detail);
 };
 
-// EEPROM helpers — call from main.cpp setup() and after configure().
+// EEPROM persistence. Both sides are stored in one block so their CRC is joint.
 void bbLoadEeprom(BBController& lox, BBController& fuel);
 void bbSaveEeprom(const BBController& lox, const BBController& fuel);

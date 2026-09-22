@@ -49,6 +49,11 @@ public:
     bool readRaw(int32_t& out);
     uint8_t readRegister(uint8_t addr);
 
+    // Reference voltage passed at construction — the scale factor for turning
+    // raw counts into volts. Use this rather than a literal so each ADC's
+    // conversions follow its own configured reference.
+    float vref() const { return _vref; }
+
 private:
     static constexpr uint8_t DEV_ADDR = 0b01;
 

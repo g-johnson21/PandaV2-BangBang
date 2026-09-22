@@ -1,53 +1,30 @@
 #pragma once
 #include <Arduino.h>
 
-// Arming state machine with explicit transitions and safety guards.
+// Master arm line.
 //
-// V1 had arm/disarm as raw GPIO writes inline in main — no debounce,
-// no guard against accidental re-arm, no minimum dwell time. This version
-// enforces:
-//   - Minimum pulse duration on the arm/disarm output
-//   - Mandatory cooldown between state changes
-//   - Explicit state queries so other subsystems can gate on armed status
+// PIN_ARM is a LEVEL, not a pulse: it must be held HIGH for as long as the
+// board is armed, because it enables the solenoid drive stage. This matches
+// test/dc_channel_test, which is the known-good reference for DC actuation:
+// arm = PIN_ARM high, disarm = PIN_ARM low, nothing else.
 //
-// The arm and disarm pins drive external relay/pyro logic. Only one
-// should ever be asserted at a time.
+// Power-on state is DISARMED (pin driven low in begin()).
 
 class ArmingController {
 public:
-    enum class State : uint8_t { DISARMED, ARMED };
+    explicit ArmingController(uint8_t armPin);
 
-    enum class Result : uint8_t {
-        ACCEPTED,   // transition started
-        IGNORED,    // still in pulse or cooldown
-        REDUNDANT   // already in the requested state
-    };
-
-    ArmingController(uint8_t armPin, uint8_t disarmPin,
-                     uint32_t pulseMs = 1000, uint32_t cooldownMs = 1000);
-
+    // Drive the arm line low. Call early in setup().
     void begin();
-    void update();
 
-    Result arm();
-    Result disarm();
+    // Returns false if already in the requested state (the pin is re-driven
+    // regardless, so a glitch can never leave it out of sync with isArmed()).
+    bool arm();
+    bool disarm();
 
-    State state() const { return _state; }
-    bool isArmed() const { return _state == State::ARMED; }
+    bool isArmed() const { return _armed; }
 
 private:
-    enum class Phase : uint8_t { IDLE, PULSING, COOLDOWN };
-
     uint8_t _armPin;
-    uint8_t _disarmPin;
-    uint32_t _pulseMs;
-    uint32_t _cooldownMs;
-
-    State _state = State::DISARMED;
-    State _pendingState = State::DISARMED;
-    Phase _phase = Phase::IDLE;
-    elapsedMillis _timer;
-
-    Result requestState(State desired);
-    void allPinsLow();
+    bool _armed = false;
 };

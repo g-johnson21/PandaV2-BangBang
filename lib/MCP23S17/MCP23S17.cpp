@@ -46,6 +46,26 @@ void MCP23S17::allOff() {
     flushState();
 }
 
+uint16_t MCP23S17::readGpio() {
+    uint8_t portB = readReg(REG_GPIOB);  // actuators 1-8
+    uint8_t portA = readReg(REG_GPIOA);  // actuators 9-16
+    return ((uint16_t)portB << 8) | portA;
+}
+
+bool MCP23S17::selfTest(uint16_t& readback) {
+    // 0xA55A: alternating on both ports, so a stuck-high or stuck-low bus,
+    // a dead port, or a swapped port all produce a distinct mismatch.
+    static constexpr uint16_t PATTERN = 0xA55A;
+
+    setAll(PATTERN);
+    uint8_t olatB = readReg(REG_OLATB);
+    uint8_t olatA = readReg(REG_OLATA);
+    readback = ((uint16_t)olatB << 8) | olatA;
+
+    allOff();
+    return readback == PATTERN;
+}
+
 // --- private ---
 
 uint16_t MCP23S17::channelBit(uint8_t ch) {

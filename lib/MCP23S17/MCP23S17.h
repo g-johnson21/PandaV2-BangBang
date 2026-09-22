@@ -21,18 +21,40 @@ public:
     // Turn all channels off. Call this on disarm.
     void allOff();
 
-    // Read back the current OLAT state
+    // Read back the locally cached OLAT state (no bus traffic)
     uint16_t getState() const { return _state; }
+
+    // --- Diagnostics ---
+    // Read a register straight off the device. Use to confirm the SPI link is
+    // live: if every register reads 0x00 or 0xFF, the chip isn't responding.
+    uint8_t readRegister(uint8_t addr) { return readReg(addr); }
+    void writeRegister(uint8_t addr, uint8_t data) { writeReg(addr, data); }
+
+    // Read the actual pin states (GPIOA/GPIOB), not the cached OLAT value.
+    // Layout matches getState(): bit15 = ACTUATE1 ... bit0 = ACTUATE16.
+    uint16_t readGpio();
+
+    // Write a test pattern to both OLATs and read it back. Returns true when
+    // the readback matches, i.e. the SPI link and the device are both healthy.
+    // Leaves all outputs OFF. Never call while anything is live on the bench.
+    bool selfTest(uint16_t& readback);
+
+    // Register addresses, exposed for diagnostic dumps
+    static constexpr uint8_t REG_IODIRA  = 0x00;
+    static constexpr uint8_t REG_IODIRB  = 0x01;
+    static constexpr uint8_t REG_IOCON   = 0x0A;
+    // DEFVALA has no effect on pin state unless interrupt-on-change is enabled
+    // (it isn't here), so it doubles as a scratch register for link testing.
+    // 0x06 is the BANK=0 address — 0x03 is DEFVALA only when IOCON.BANK=1,
+    // and in BANK=0 that address is IPOLB (datasheet Table 3-1).
+    static constexpr uint8_t REG_DEFVALA = 0x06;
+    static constexpr uint8_t REG_GPIOA   = 0x12;
+    static constexpr uint8_t REG_GPIOB   = 0x13;
+    static constexpr uint8_t REG_OLATA   = 0x14;
+    static constexpr uint8_t REG_OLATB   = 0x15;
 
 private:
     static constexpr uint8_t OPCODE_BASE = 0x40;
-
-    // Register addresses (IOCON.BANK = 0, default)
-    static constexpr uint8_t REG_IODIRA  = 0x00;
-    static constexpr uint8_t REG_IODIRB  = 0x01;
-    static constexpr uint8_t REG_OLATA   = 0x14;
-    static constexpr uint8_t REG_OLATB   = 0x15;
-    static constexpr uint8_t REG_IOCON   = 0x0A;
 
     uint8_t _cs;
     SPIClass& _spi;

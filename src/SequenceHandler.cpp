@@ -2,13 +2,11 @@
 #include <cstring>
 #include <cstdio>
 
-SequenceHandler::SequenceHandler() {}
+SequenceHandler::SequenceHandler(MCP23S17& expander) : _exp(expander) {}
 
 void SequenceHandler::begin() {
-    for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
-        pinMode(DC_PINS[i], OUTPUT);
-        digitalWrite(DC_PINS[i], LOW);
-    }
+    // begin() configures every expander pin as an output and clears both OLATs.
+    _exp.begin();
 }
 
 bool SequenceHandler::setCommand(const char* command) {
@@ -85,7 +83,8 @@ void SequenceHandler::update() {
 
     if (!_inDelay) {
         SequenceStep& step = _steps[_currentStep];
-        digitalWrite(DC_PINS[step.channel - 1], step.state ? HIGH : LOW);
+        _exp.setChannel(step.channel, step.state);
+        if (_onStep) _onStep(_currentStep, step);
         _stepTimer = 0;
         _inDelay = true;
     }
@@ -107,12 +106,12 @@ void SequenceHandler::cancelExecution() {
 }
 
 void SequenceHandler::setAllOff() {
-    for (uint8_t i = 0; i < NUM_ACTUATORS; i++)
-        digitalWrite(DC_PINS[i], LOW);
+    // Clears all 16 expander outputs, not just the exposed NUM_ACTUATORS —
+    // this is the disarm path, so nothing should be left driven.
+    _exp.allOff();
 }
 
 bool SequenceHandler::setChannel(uint8_t channel, bool state) {
     if (channel < 1 || channel > NUM_ACTUATORS) return false;
-    digitalWrite(DC_PINS[channel - 1], state ? HIGH : LOW);
-    return true;
+    return _exp.setChannel(channel, state);
 }

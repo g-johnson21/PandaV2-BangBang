@@ -11,8 +11,8 @@
 
 // ── Hardware ────────────────────────────────────────────────────────
 
-MCP3561RT adc1(PIN_ADC1_CS, PIN_ADC1_IRQ, SPI,  SPI_ADC_SETTINGS, 1.25f);
-MCP3561RT adc2(PIN_ADC2_CS, PIN_ADC2_IRQ, SPI1, SPI_ADC_SETTINGS, 1.25f);
+MCP3561RT adc1(PIN_ADC1_CS, PIN_ADC1_IRQ, SPI,  SPI_ADC_SETTINGS, ADC1_VREF_V);
+MCP3561RT adc2(PIN_ADC2_CS, PIN_ADC2_IRQ, SPI1, SPI_BUS1_SETTINGS, ADC2_VREF_V);
 
 static constexpr uint8_t MUX_A_PINS[4] = {PIN_MUX_A_S0, PIN_MUX_A_S1, PIN_MUX_A_S2, PIN_MUX_A_S3};
 static constexpr uint8_t MUX_B_PINS[4] = {PIN_MUX_B_S0, PIN_MUX_B_S1, PIN_MUX_B_S2, PIN_MUX_B_S3};
@@ -39,7 +39,8 @@ static void setMuxChannel(const uint8_t pins[4], uint8_t ch) {
 
 struct ReadResult { bool ok; int32_t raw; float voltage; };
 
-static ReadResult singleRead(MCP3561RT& adc, float vref = 1.25f) {
+// Scales by the ADC's own reference (ADCn_VREF_V via the constructor).
+static ReadResult singleRead(MCP3561RT& adc) {
     ReadResult r = {false, 0, 0.0f};
     adc.trigger();
     elapsedMicros timeout;
@@ -47,18 +48,18 @@ static ReadResult singleRead(MCP3561RT& adc, float vref = 1.25f) {
         if (timeout > CONV_TIMEOUT_US) return r;
     }
     if (adc.readRaw(r.raw)) {
-        r.voltage = vref * (float(r.raw) / 8388608.0f);
+        r.voltage = adc.vref() * (float(r.raw) / 8388608.0f);
         r.ok = true;
     }
     return r;
 }
 
 static ReadResult readMuxCh(MCP3561RT& adc, const uint8_t muxPins[4],
-                             MCP3561RT::Mux adcInput, uint8_t ch, float vref = 1.25f) {
+                             MCP3561RT::Mux adcInput, uint8_t ch) {
     adc.setMux(adcInput, MCP3561RT::Mux::AGND);
     setMuxChannel(muxPins, ch);
     delayMicroseconds(T_MUX_SETTLE_US);
-    return singleRead(adc, vref);
+    return singleRead(adc);
 }
 
 static float readBoardTemp(MCP3561RT& adc) {
@@ -159,7 +160,7 @@ static void testCurrentSweep() {
     Serial.println("  ----+-------------+----------------+-------------");
 
     for (uint8_t ch = 0; ch < NUM_MUX_B_CH; ch++) {
-        ReadResult r = readMuxCh(adc1, MUX_B_PINS, MCP3561RT::Mux::CH1, ch, 3.3f);
+        ReadResult r = readMuxCh(adc1, MUX_B_PINS, MCP3561RT::Mux::CH1, ch);
         if (r.ok) {
             float amps = convertCurrent(r.voltage);
             Serial.printf("  %02d  | %10d  |  %+.6f     |  %.4f\n",
@@ -252,7 +253,7 @@ static void testStream() {
         if (adc1_ok) {
             Serial.print("CUR:");
             for (uint8_t ch = 0; ch < NUM_MUX_B_CH; ch++) {
-                ReadResult r = readMuxCh(adc1, MUX_B_PINS, MCP3561RT::Mux::CH1, ch, 3.3f);
+                ReadResult r = readMuxCh(adc1, MUX_B_PINS, MCP3561RT::Mux::CH1, ch);
                 if (ch > 0) Serial.print(',');
                 if (r.ok)
                     Serial.printf("%.4f", convertCurrent(r.voltage));
